@@ -9,7 +9,8 @@
 ## 1. Resume Entry (Ready to Copy & Paste)
 
 ```markdown
-**ML-Accelerated Analog Filter EDA Synthesizer & SPICE Verification Engine** | *Python, SPICE (ngspice), SciPy, KiCad, Streamlit*
+**ML-Accelerated Analog Filter EDA Synthesizer & SPICE Studio**
+[Live Web Demo](https://pushkal-filter-studio.streamlit.app/) | [GitHub Repository](https://github.com/pushkalgolla-svg/analog-filter-optimizer)
 - Engineered an end-to-end EDA synthesis pipeline for active/passive analog filters (LPF, HPF, BPF, and 4th-order cascaded Butterworth biquads) achieving < 0.15% cutoff accuracy mapped to commercial EIA standard components (E12, E24, E96).
 - Implemented a continuous Nelder-Mead optimization algorithm operating in logarithmic parameter space ($log_{10} R, log_{10} C$), normalizing 12 orders of magnitude of component scale and preventing gradient explosion.
 - Built an automated SPICE co-simulation feedback loop using portable 64-bit ngspice in console batch mode with dynamic AC sweeps and automated -3dB cutoff and quality factor (Q) extraction.

@@ -3,9 +3,11 @@
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
 [![SPICE](https://img.shields.io/badge/SPICE-ngspice_47-red.svg)](http://ngspice.sourceforge.net/)
 [![EDA](https://img.shields.io/badge/EDA-KiCad_8_Ready-green.svg)](https://www.kicad.org/)
-[![Streamlit](https://img.shields.io/badge/GUI-Streamlit-orange.svg)](https://streamlit.io/)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://pushkal-filter-studio.streamlit.app/)
 
 An end-to-end analog active and passive filter synthesis engine powered by numerical optimization (`scipy.optimize.minimize`), direct SPICE simulation verification (`ngspice`), automated commercial component snapping (E12, E24, E96), statistical Monte Carlo manufacturing yield analysis, production BOM generation, KiCad schematic export, and an interactive web studio.
+
+🌐 **Live Web Application**: [https://pushkal-filter-studio.streamlit.app/](https://pushkal-filter-studio.streamlit.app/)
 
 > 📄 **Looking for portfolio case study details and resume bullet points?**  
 > See the dedicated [PORTFOLIO_CASE_STUDY.md](PORTFOLIO_CASE_STUDY.md) for full circuit derivations, architecture diagrams, and technical interview talking points.
