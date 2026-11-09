@@ -1,0 +1,17 @@
+(export (version D) (design (source "AnalogFilterSynthesis") (tool "ML-Filter-Synthesizer"))
+  (components
+    (comp (ref R1) (value "31.6k Ohm") (footprint Resistor_SMD:R_0805_2012Metric))
+    (comp (ref R2) (value "4.53k Ohm") (footprint Resistor_SMD:R_0805_2012Metric))
+    (comp (ref R3) (value "63.4k Ohm") (footprint Resistor_SMD:R_0805_2012Metric))
+    (comp (ref C1) (value "10nF") (footprint Capacitor_SMD:C_0805_2012Metric))
+    (comp (ref C2) (value "10nF") (footprint Capacitor_SMD:C_0805_2012Metric))
+    (comp (ref U1) (value "OPA1678") (footprint Package_SO:SOIC-8_3.9x4.9mm_P1.27mm))
+  )
+  (nets
+    (net (code 1) (name "IN") (node (ref R1) (pin 1)))
+    (net (code 2) (name "Net-(R1-Pad2)") (node (ref R1) (pin 2)) (node (ref R2) (pin 1)) (node (ref C1) (pin 1)) (node (ref C2) (pin 1)))
+    (net (code 3) (name "Net-(C1-Pad2)") (node (ref C1) (pin 2)) (node (ref R3) (pin 1)) (node (ref U1) (pin 2)))
+    (net (code 4) (name "OUT") (node (ref C2) (pin 2)) (node (ref R3) (pin 2)) (node (ref U1) (pin 1)))
+    (net (code 5) (name "GND") (node (ref R2) (pin 2)) (node (ref U1) (pin 3)) (node (ref U1) (pin 4)))
+  )
+)

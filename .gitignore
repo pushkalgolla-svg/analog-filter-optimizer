@@ -1,0 +1,26 @@
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Local tools and binary packages (keep repository lightweight)
+tools/
+*.7z
+*.zip
+*.tar.gz
+
+# Streamlit local configuration
+.streamlit/
+
+# Temporary run artifacts
+output/test_*
+output/app_sim_data.txt
+output/mc_temp_sim.txt

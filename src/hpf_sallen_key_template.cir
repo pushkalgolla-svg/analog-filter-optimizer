@@ -1,0 +1,20 @@
+* Parameterized 2nd-Order Active Sallen-Key High-Pass Filter Template
+Vin in 0 ac 1.0
+
+* Sallen-Key HPF Network (2nd-Order)
+C1 in n1 {C1_VAL}
+C2 n1 inp {C2_VAL}
+R1 n1 out {R1_VAL}
+R2 inp 0 {R2_VAL}
+
+* Unity-Gain Op-Amp Buffer (Voltage-Controlled Voltage Source, AOL = 100,000)
+Eop out 0 inp out 1e5
+
+.control
+set wr_singlescale
+ac dec 100 {F_START} {F_STOP}
+let vdb_out = db(v(out))
+wrdata output/sim_data.txt vdb_out
+quit
+.endc
+.end

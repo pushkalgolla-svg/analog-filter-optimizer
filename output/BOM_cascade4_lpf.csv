@@ -1,0 +1,10 @@
+Item,RefDes,Value,Tolerance,Package,Manufacturer,Manufacturer Part Number,Description,Est. Unit Cost (USD)
+1,R1_1,14.7k Ohm,+/-1.0%,0805 SMD,Yageo,RC0805FR-0714700RL,14.7k Ohm Thick Film Chip Resistor 1/8W 150V 100ppm/C,$0.02
+2,R2_1,14.7k Ohm,+/-1.0%,0805 SMD,Yageo,RC0805FR-0714700RL,14.7k Ohm Thick Film Chip Resistor 1/8W 150V 100ppm/C,$0.02
+3,C1_1,12nF,+/-5.0%,0805 SMD,Murata Electronics,GRM21BR71HCUSTOM,12nF Multilayer Ceramic Capacitor 50V C0G/X7R,$0.06
+4,C2_1,10nF,+/-5.0%,0805 SMD,Murata Electronics,GRM21BR71HCUSTOM,10nF Multilayer Ceramic Capacitor 50V C0G/X7R,$0.06
+5,R1_2,12.7k Ohm,+/-1.0%,0805 SMD,Yageo,RC0805FR-0712700RL,12.7k Ohm Thick Film Chip Resistor 1/8W 150V 100ppm/C,$0.02
+6,R2_2,12.7k Ohm,+/-1.0%,0805 SMD,Yageo,RC0805FR-0712700RL,12.7k Ohm Thick Film Chip Resistor 1/8W 150V 100ppm/C,$0.02
+7,C1_2,33nF,+/-5.0%,0805 SMD,Murata Electronics,GRM21BR71HCUSTOM,33nF Multilayer Ceramic Capacitor 50V C0G/X7R,$0.06
+8,C2_2,4.7nF,+/-5.0%,0805 SMD,Murata Electronics,GRM21BR71HCUSTOM,4.7nF Multilayer Ceramic Capacitor 50V C0G/X7R,$0.06
+9,"U1, U2",OPA1678,N/A,SOIC-8,Texas Instruments,OPA1678IDR,SoundPlus Dual Low-Distortion Audio Operational Amplifier (SOIC-8),$0.85

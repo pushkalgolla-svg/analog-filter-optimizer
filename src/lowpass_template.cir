@@ -1,0 +1,17 @@
+* Parameterized First-Order RC Low-Pass Filter Template
+* Vin is an independent AC voltage source (1V AC, 0 phase)
+Vin in 0 ac 1.0
+
+* Low-Pass Filter components with parameterized values
+R1 in out {R_VAL}
+C1 out 0 {C_VAL}
+
+* Control block for AC frequency sweep and automated data export
+.control
+set wr_singlescale
+ac dec 100 10 100k
+let vdb_out = db(v(out))
+wrdata output/sim_data.txt vdb_out
+quit
+.endc
+.end

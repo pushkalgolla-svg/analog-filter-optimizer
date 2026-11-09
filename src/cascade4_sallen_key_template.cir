@@ -1,0 +1,25 @@
+* Parameterized 4th-Order Cascaded Sallen-Key Butterworth Low-Pass Filter Template
+Vin in 0 ac 1.0
+
+* Stage 1 (Biquad 1: Q1 = 0.5412)
+R1_1 in n1 {R1_1_VAL}
+R2_1 n1 inp1 {R2_1_VAL}
+C1_1 n1 out1 {C1_1_VAL}
+C2_1 inp1 0 {C2_1_VAL}
+Eop1 out1 0 inp1 out1 1e5
+
+* Stage 2 (Biquad 2: Q2 = 1.3065)
+R1_2 out1 n2 {R1_2_VAL}
+R2_2 n2 inp2 {R2_2_VAL}
+C1_2 n2 out2 {C1_2_VAL}
+C2_2 inp2 0 {C2_2_VAL}
+Eop2 out2 0 inp2 out2 1e5
+
+.control
+set wr_singlescale
+ac dec 100 {F_START} {F_STOP}
+let vdb_out = db(v(out2))
+wrdata output/sim_data.txt vdb_out
+quit
+.endc
+.end

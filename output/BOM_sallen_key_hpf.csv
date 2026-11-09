@@ -1,0 +1,6 @@
+Item,RefDes,Value,Tolerance,Package,Manufacturer,Manufacturer Part Number,Description,Est. Unit Cost (USD)
+1,R1,75k Ohm,+/-1.0%,0805 SMD,Yageo,RC0805FR-0775000RL,75k Ohm Thick Film Chip Resistor 1/8W 150V 100ppm/C,$0.02
+2,R2,150k Ohm,+/-1.0%,0805 SMD,Yageo,RC0805FR-07150000RL,150k Ohm Thick Film Chip Resistor 1/8W 150V 100ppm/C,$0.02
+3,C1,1.5nF,+/-5.0%,0805 SMD,Murata Electronics,GRM21BR71HCUSTOM,1.5nF Multilayer Ceramic Capacitor 50V C0G/X7R,$0.06
+4,C2,1.5nF,+/-5.0%,0805 SMD,Murata Electronics,GRM21BR71HCUSTOM,1.5nF Multilayer Ceramic Capacitor 50V C0G/X7R,$0.06
+5,U1,OPA1678,N/A,SOIC-8,Texas Instruments,OPA1678IDR,SoundPlus Dual Low-Distortion Audio Operational Amplifier (SOIC-8),$0.85

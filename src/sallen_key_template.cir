@@ -1,0 +1,20 @@
+* Parameterized 2nd-Order Active Sallen-Key Low-Pass Filter Template
+Vin in 0 ac 1.0
+
+* Sallen-Key Filter Network (2nd-Order)
+R1 in n1 {R1_VAL}
+R2 n1 inp {R2_VAL}
+C1 n1 out {C1_VAL}
+C2 inp 0 {C2_VAL}
+
+* Unity-Gain Op-Amp Buffer (Voltage-Controlled Voltage Source, AOL = 100,000)
+Eop out 0 inp out 1e5
+
+.control
+set wr_singlescale
+ac dec 100 10 100k
+let vdb_out = db(v(out))
+wrdata output/sim_data.txt vdb_out
+quit
+.endc
+.end
