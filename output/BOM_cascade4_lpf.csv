@@ -1,10 +1,10 @@
-Item,RefDes,Value,Tolerance,Rating,Package,Manufacturer,Manufacturer Part Number,Description,Datasheet / Reference,Est. Unit Cost (USD)
-1,R1_1,14.7k Ohm,+/-1.0%,0.125W 150V,0805 SMD,Yageo,RC0805FR-0714K7L,14.7k Ohm Thick Film Chip Resistor 0805 1/8W 150V +/-1%,https://www.yageo.com,$0.02
-2,R2_1,14.7k Ohm,+/-1.0%,0.125W 150V,0805 SMD,Yageo,RC0805FR-0714K7L,14.7k Ohm Thick Film Chip Resistor 0805 1/8W 150V +/-1%,https://www.yageo.com,$0.02
-3,C1_1,12nF,+/-5.0%,50V X7R,0805 SMD,Murata Electronics,GRM21BR71H123KA01L,12nF Multilayer Ceramic Capacitor 0805 50V X7R,https://www.murata.com,$0.06
-4,C2_1,10nF,+/-5.0%,50V X7R,0805 SMD,Murata Electronics,GRM21BR71H103KA01L,10nF (0.01uF) Multilayer Ceramic Capacitor 0805 50V X7R,https://www.murata.com,$0.06
-5,R1_2,12.7k Ohm,+/-1.0%,0.125W 150V,0805 SMD,Yageo,RC0805FR-0712K7L,12.7k Ohm Thick Film Chip Resistor 0805 1/8W 150V +/-1%,https://www.yageo.com,$0.02
-6,R2_2,12.7k Ohm,+/-1.0%,0.125W 150V,0805 SMD,Yageo,RC0805FR-0712K7L,12.7k Ohm Thick Film Chip Resistor 0805 1/8W 150V +/-1%,https://www.yageo.com,$0.02
-7,C1_2,33nF,+/-5.0%,50V X7R,0805 SMD,Murata Electronics,GRM21BR71H333KA01L,33nF Multilayer Ceramic Capacitor 0805 50V X7R,https://www.murata.com,$0.06
-8,C2_2,4.7nF,+/-5.0%,50V X7R,0805 SMD,Murata Electronics,GRM216R71H472KA01D,4.7nF Multilayer Ceramic Capacitor 0805 50V X7R,https://www.murata.com,$0.05
-9,"U1, U2",OPA1678,N/A,"4.5V to 36V, 16MHz GBW, 4.5nV/rtHz",SOIC-8,Texas Instruments,OPA1678IDR,SoundPlus Dual Low-Distortion Audio Operational Amplifier (SOIC-8),https://www.ti.com/lit/ds/symlink/opa1678.pdf,$0.85
+Item,RefDes,Value,Component Tolerance,Design / MC Tolerance,Rating,Package,Manufacturer,Manufacturer Part Number,Description,Datasheet / Reference,Est. Unit Cost (USD)
+1,R1_1,14.7k Ohm,+/-1.0%,+/-1.0%,0.125W 150V,0805 SMD,Yageo,RC0805FR-0714K7L,14.7k Ohm Thick Film Chip Resistor 0805 1/8W 150V +/-1%,https://www.yageo.com/upload/files/datasheet/smd/RC_L_2016_v4.pdf,$0.02
+2,R2_1,14.7k Ohm,+/-1.0%,+/-1.0%,0.125W 150V,0805 SMD,Yageo,RC0805FR-0714K7L,14.7k Ohm Thick Film Chip Resistor 0805 1/8W 150V +/-1%,https://www.yageo.com/upload/files/datasheet/smd/RC_L_2016_v4.pdf,$0.02
+3,C1_1,12nF,Generic - MPN not verified,+/-5.0%,50V Ceramic,0805 SMD,Generic,Generic - MPN not verified,12nF Capacitor (0805 SMD),N/A (Generic),$0.06
+4,C2_1,10nF,+/-5.0%,+/-5.0%,50V C0G,0805 SMD,Murata Electronics,GRM2195C1H103JA01D,10nF Multilayer Ceramic Capacitor 0805 50V C0G +/-5%,https://www.murata.com/en-global/products/productdetail?partno=GRM2195C1H103JA01%23,$0.09
+5,R1_2,12.7k Ohm,+/-1.0%,+/-1.0%,0.125W 150V,0805 SMD,Yageo,RC0805FR-0712K7L,12.7k Ohm Thick Film Chip Resistor 0805 1/8W 150V +/-1%,https://www.yageo.com/upload/files/datasheet/smd/RC_L_2016_v4.pdf,$0.02
+6,R2_2,12.7k Ohm,+/-1.0%,+/-1.0%,0.125W 150V,0805 SMD,Yageo,RC0805FR-0712K7L,12.7k Ohm Thick Film Chip Resistor 0805 1/8W 150V +/-1%,https://www.yageo.com/upload/files/datasheet/smd/RC_L_2016_v4.pdf,$0.02
+7,C1_2,33nF,Generic - MPN not verified,+/-5.0%,50V Ceramic,0805 SMD,Generic,Generic - MPN not verified,33nF Capacitor (0805 SMD),N/A (Generic),$0.06
+8,C2_2,4.7nF,+/-5.0%,+/-5.0%,50V C0G,0805 SMD,Murata Electronics,GRM2165C1H472JA01D,4.7nF Multilayer Ceramic Capacitor 0805 50V C0G +/-5%,https://www.murata.com/en-global/products/productdetail?partno=GRM2165C1H472JA01%23,$0.08
+9,"U1, U2",OPA1678,N/A,N/A,"4.5V to 36V, 16MHz GBW, 4.5nV/rtHz",SOIC-8,Texas Instruments,OPA1678IDR,SoundPlus Dual Low-Distortion Audio Operational Amplifier (SOIC-8),https://www.ti.com/lit/ds/symlink/opa1678.pdf,$0.85

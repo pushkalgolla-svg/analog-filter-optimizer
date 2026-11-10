@@ -142,10 +142,10 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
 
     def test_verified_capacitor_lookup(self):
         """Verified 10 nF 0805 capacitor returns exact Murata MPN and datasheet link."""
-        part = find_verified_component("C1", 10.0e-9)
+        part = find_verified_component("C1", 10.0e-9, tol=5.0)
         self.assertEqual(part["mfr"], "Murata Electronics")
-        self.assertEqual(part["mpn"], "GRM21BR71H103KA01L")
-        self.assertEqual(part["rating"], "50V X7R")
+        self.assertEqual(part["mpn"], "GRM2195C1H103JA01D")
+        self.assertEqual(part["rating"], "50V C0G")
         self.assertIn("murata.com", part["ref"])
 
     def test_verified_opamp_lookup(self):
@@ -171,6 +171,76 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
             self.assertFalse(part["mpn"].startswith("RC0805FR-07"),
                              f"Fabricated MPN generated for unverified value {val}: {part['mpn']}")
 
+    def test_10pct_capacitor_does_not_satisfy_5pct_design_tolerance(self):
+        """A +/-10% capacitor must not satisfy a +/-5% design tolerance requirement."""
+        # 100 nF capacitor in catalogue has tol_pct=10.0 (+/-10% X7R)
+        part_fail = find_verified_component("C1", 100.0e-9, tol=5.0)
+        self.assertEqual(part_fail["mfr"], "Generic")
+        self.assertEqual(part_fail["mpn"], "Generic - MPN not verified")
+
+        # But with tol=10.0, the same 100 nF capacitor matches
+        part_pass = find_verified_component("C1", 100.0e-9, tol=10.0)
+        self.assertEqual(part_pass["mfr"], "Murata Electronics")
+        self.assertEqual(part_pass["mpn"], "GRM21BR71H104KA01L")
+        self.assertEqual(part_pass["tolerance"], "+/-10.0%")
+
+    def test_1pct_resistor_does_not_satisfy_half_pct_design_tolerance(self):
+        """A +/-1% resistor must not satisfy a +/-0.5% precision design tolerance."""
+        # 10 kΩ resistor in catalogue is rated +/-1.0% (tol_pct=1.0)
+        part = find_verified_component("R1", 10000.0, tol=0.5)
+        self.assertEqual(part["mfr"], "Generic")
+        self.assertEqual(part["mpn"], "Generic - MPN not verified")
+
+    def test_1pct_resistor_satisfies_5pct_design_requirement_showing_actual_1pct_rating(self):
+        """A +/-1% resistor may satisfy a +/-5% design requirement, but its BOM must show the actual +/-1% rating."""
+        part = find_verified_component("R1", 10000.0, tol=5.0)
+        self.assertEqual(part["mfr"], "Yageo")
+        self.assertEqual(part["mpn"], "RC0805FR-0710KL")
+        self.assertEqual(part["tolerance"], "+/-1.0%")
+        self.assertEqual(part["tol_pct"], 1.0)
+
+        bom = generate_bom_data("1st_order_rc", {"R1": 10000.0, "C1": 1.0e-8}, r_tol=5.0, c_tol=5.0)
+        r_row = next(r for r in bom if r["RefDes"] == "R1")
+        self.assertEqual(r_row["Component Tolerance"], "+/-1.0%")
+        self.assertEqual(r_row["Design / MC Tolerance"], "+/-5.0%")
+
+    def test_mc_assumed_tolerance_and_actual_bom_component_tolerance_displayed_separately(self):
+        """Monte Carlo assumed tolerance and actual BOM component tolerance must be displayed separately."""
+        bom = generate_bom_data("sallen_key_lpf", {"R1": 10000.0, "R2": 22000.0, "C1": 10.0e-9, "C2": 4.7e-9}, r_tol=1.0, c_tol=5.0)
+        for row in bom:
+            self.assertIn("Component Tolerance", row)
+            self.assertIn("Design / MC Tolerance", row)
+            if row["RefDes"] == "U1":
+                self.assertEqual(row["Component Tolerance"], "N/A")
+                self.assertEqual(row["Design / MC Tolerance"], "N/A")
+            elif row["RefDes"].startswith("R"):
+                self.assertEqual(row["Component Tolerance"], "+/-1.0%")
+                self.assertEqual(row["Design / MC Tolerance"], "+/-1.0%")
+            elif row["RefDes"].startswith("C"):
+                self.assertEqual(row["Component Tolerance"], "+/-5.0%")
+                self.assertEqual(row["Design / MC Tolerance"], "+/-5.0%")
+
+    def test_obsolete_components_not_automatically_selected(self):
+        """Obsolete or discontinued components must not be automatically selected for a new manufacturing BOM."""
+        # 6.8 nF capacitor is marked status: 'Obsolete' in catalogue
+        part = find_verified_component("C1", 6.8e-9, tol=10.0)
+        self.assertEqual(part["mfr"], "Generic")
+        self.assertEqual(part["mpn"], "Generic - MPN not verified")
+
+        # Obsolete op-amp LM301A must also fall back to generic
+        opamp = find_verified_component("U1", "LM301A")
+        self.assertEqual(opamp["mfr"], "Generic")
+        self.assertEqual(opamp["mpn"], "Generic - MPN not verified")
+
+    def test_unverified_or_incompatible_parts_use_generic_fallback(self):
+        """Unverified values or incompatible tolerances must use explicit Generic fallback."""
+        # Unverified arbitrary value
+        part = find_verified_component("R1", 7777.7)
+        self.assertEqual(part["mfr"], "Generic")
+        self.assertEqual(part["mpn"], "Generic - MPN not verified")
+        self.assertEqual(part["tolerance"], "Generic - MPN not verified")
+        self.assertEqual(part["ref"], "N/A (Generic)")
+
     def test_bom_csv_generation_and_schema(self):
         """Generate BOM data and verify CSV export schema and parseability."""
         comp_dict = {"R1": 10000.0, "R2": 22000.0, "C1": 10.0e-9, "C2": 4.7e-9}
@@ -185,7 +255,7 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
         with open(out_csv, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             expected_fields = [
-                "Item", "RefDes", "Value", "Tolerance", "Rating",
+                "Item", "RefDes", "Value", "Component Tolerance", "Design / MC Tolerance", "Rating",
                 "Package", "Manufacturer", "Manufacturer Part Number",
                 "Description", "Datasheet / Reference", "Est. Unit Cost (USD)"
             ]
