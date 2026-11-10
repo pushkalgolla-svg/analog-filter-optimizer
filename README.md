@@ -33,6 +33,8 @@ An end-to-end analog active and passive filter synthesis engine powered by conti
   - Evaluates Cutoff Frequency Compliance Yield against $\pm 2\%$ and $\pm 5\%$ specification windows (clearly identified as measuring cutoff frequency tolerance compliance, distinct from full board manufacturing yield).
 - **Production BOM & KiCad 8 Export**:
   - Generates CSV Bill of Materials strictly from verified manufacturer part catalogues (Yageo, Murata, Texas Instruments OPA1678) or labels non-catalogue values explicitly as `Generic - MPN not verified` (no fabricated part numbers).
+  - Enforces active manufacturer lifecycle status validation (e.g., active 100V C0G Murata capacitors replacing NRND 50V parts).
+  - Maps physical multi-unit IC packages accurately: the 4th-order cascaded Sallen-Key LPF maps its two amplifier sections to Units A and B of a single physical dual-channel OPA1678 (`U1`, SOIC-8) in both BOM and KiCad schematic netlists.
   - Generates standard KiCad schematic netlists (`.net`) for PCB layout import.
 - **Interactive Web Studio**:
   - Modern Streamlit UI with live frequency tuning, interactive Bode plots, Monte Carlo yield gauges, and one-click BOM/netlist downloads.

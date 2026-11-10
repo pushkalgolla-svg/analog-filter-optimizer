@@ -300,19 +300,45 @@ VERIFIED_COMPONENT_CATALOG = {
         }
     },
     "capacitors": {
-        1.0e-9: {
-            "mfr": "Murata Electronics",
-            "mpn": "GRM2165C1H102JA01D",
-            "package": "0805 SMD",
-            "rating": "50V C0G",
-            "tolerance": "+/-5.0%",
-            "tol_pct": 5.0,
-            "status": "Active",
-            "description": "1.0nF (1000pF) Multilayer Ceramic Capacitor 0805 50V C0G +/-5%",
-            "ref": "https://www.murata.com/en-global/products/productdetail?partno=GRM2165C1H102JA01%23",
-            "cost": "$0.08"
-        },
+        1.0e-9: [
+            {
+                "mfr": "Murata Electronics",
+                "mpn": "GRM2165C2A102JA01D",
+                "package": "0805 SMD",
+                "rating": "100V C0G",
+                "tolerance": "+/-5.0%",
+                "tol_pct": 5.0,
+                "status": "Active",
+                "description": "1.0nF (1000pF) Multilayer Ceramic Capacitor 0805 100V C0G +/-5%",
+                "ref": "https://www.murata.com/en-global/products/productdetail?partno=GRM2165C2A102JA01%23",
+                "cost": "$0.08"
+            },
+            {
+                "mfr": "Murata Electronics",
+                "mpn": "GRM2165C1H102JA01D",
+                "package": "0805 SMD",
+                "rating": "50V C0G",
+                "tolerance": "+/-5.0%",
+                "tol_pct": 5.0,
+                "status": "NRND",
+                "description": "1.0nF Multilayer Ceramic Capacitor 0805 50V C0G +/-5% (NRND - Not For New Designs)",
+                "ref": "https://www.murata.com/en-global/products/productdetail?partno=GRM2165C1H102JA01%23",
+                "cost": "$0.08"
+            }
+        ],
         1.5e-9: [
+            {
+                "mfr": "Murata Electronics",
+                "mpn": "GRM2165C2A152JA01D",
+                "package": "0805 SMD",
+                "rating": "100V C0G",
+                "tolerance": "+/-5.0%",
+                "tol_pct": 5.0,
+                "status": "Active",
+                "description": "1.5nF Multilayer Ceramic Capacitor 0805 100V C0G +/-5%",
+                "ref": "https://www.murata.com/en-global/products/productdetail?partno=GRM2165C2A152JA01%23",
+                "cost": "$0.08"
+            },
             {
                 "mfr": "Murata Electronics",
                 "mpn": "GRM2165C1H152JA01D",
@@ -320,8 +346,8 @@ VERIFIED_COMPONENT_CATALOG = {
                 "rating": "50V C0G",
                 "tolerance": "+/-5.0%",
                 "tol_pct": 5.0,
-                "status": "Active",
-                "description": "1.5nF Multilayer Ceramic Capacitor 0805 50V C0G +/-5%",
+                "status": "NRND",
+                "description": "1.5nF Multilayer Ceramic Capacitor 0805 50V C0G +/-5% (NRND - Not For New Designs)",
                 "ref": "https://www.murata.com/en-global/products/productdetail?partno=GRM2165C1H152JA01%23",
                 "cost": "$0.08"
             },
@@ -681,8 +707,15 @@ def generate_bom_data(topology_type, components, r_tol=1.0, c_tol=5.0):
 
     # Add active op-amps for active topologies
     if "sallen_key" in topology_type.lower() or "mfb" in topology_type.lower() or "cascade" in topology_type.lower():
-        num_opamps = 2 if "cascade" in topology_type.lower() else 1
-        ref_opamp = "U1, U2" if num_opamps == 2 else "U1"
+        # Dual-channel SOIC-8 op-amp (OPA1678): one physical package contains two amplifier units (A & B).
+        # For 2nd-order stages (Sallen-Key, MFB), one unit is used.
+        # For 4th-order cascade, both units (A & B) of the single physical IC are used.
+        ref_opamp = "U1"
+        desc = (
+            "SoundPlus Dual Low-Distortion Audio Operational Amplifier (SOIC-8, Dual Channel - Sections A & B)"
+            if "cascade" in topology_type.lower()
+            else "SoundPlus Dual Low-Distortion Audio Operational Amplifier (SOIC-8)"
+        )
         info = find_verified_component("U1", "OPA1678")
         bom_rows.append(BOMRow({
             "Item": item_num,
@@ -694,7 +727,7 @@ def generate_bom_data(topology_type, components, r_tol=1.0, c_tol=5.0):
             "Package": info["package"],
             "Manufacturer": info["mfr"],
             "Manufacturer Part Number": info["mpn"],
-            "Description": info["description"],
+            "Description": desc,
             "Datasheet / Reference": info["ref"],
             "Est. Unit Cost (USD)": info["cost"]
         }))
@@ -733,9 +766,12 @@ def export_kicad_netlist(topology_type, components, file_path):
             lines.append(f"    (comp (ref {ref_des}) (value \"{val_str}\") (footprint Capacitor_SMD:C_0805_2012Metric))")
 
     if "sallen_key" in topology_type.lower() or "mfb" in topology_type.lower() or "cascade" in topology_type.lower():
-        num_opamps = 2 if "cascade" in topology_type.lower() else 1
-        for i in range(1, num_opamps + 1):
-            lines.append(f"    (comp (ref U{i}) (value \"OPA1678\") (footprint Package_SO:SOIC-8_3.9x4.9mm_P1.27mm))")
+        desc = (
+            "Dual Op-Amp (Channels A & B)"
+            if "cascade" in topology_type.lower()
+            else "Dual Op-Amp"
+        )
+        lines.append(f"    (comp (ref U1) (value \"OPA1678\") (footprint Package_SO:SOIC-8_3.9x4.9mm_P1.27mm) (description \"{desc}\"))")
 
     lines.append("  )")
     lines.append("  (nets")
@@ -778,9 +814,9 @@ def export_kicad_netlist(topology_type, components, file_path):
             "    (net (code 3) (name \"STAGE1_INP\") (node (ref R2_1) (pin 2)) (node (ref C2_1) (pin 1)) (node (ref U1) (pin 3)))",
             "    (net (code 4) (name \"STAGE1_OUT\") (node (ref C1_1) (pin 2)) (node (ref U1) (pin 1)) (node (ref U1) (pin 2)) (node (ref R1_2) (pin 1)))",
             "    (net (code 5) (name \"STAGE2_NODE\") (node (ref R1_2) (pin 2)) (node (ref R2_2) (pin 1)) (node (ref C1_2) (pin 1)))",
-            "    (net (code 6) (name \"STAGE2_INP\") (node (ref R2_2) (pin 2)) (node (ref C2_2) (pin 1)) (node (ref U2) (pin 3)))",
-            "    (net (code 7) (name \"OUT\") (node (ref C1_2) (pin 2)) (node (ref U2) (pin 1)) (node (ref U2) (pin 2)))",
-            "    (net (code 8) (name \"GND\") (node (ref C2_1) (pin 2)) (node (ref C2_2) (pin 2)) (node (ref U1) (pin 4)) (node (ref U2) (pin 4)))",
+            "    (net (code 6) (name \"STAGE2_INP\") (node (ref R2_2) (pin 2)) (node (ref C2_2) (pin 1)) (node (ref U1) (pin 5)))",
+            "    (net (code 7) (name \"OUT\") (node (ref C1_2) (pin 2)) (node (ref U1) (pin 7)) (node (ref U1) (pin 6)))",
+            "    (net (code 8) (name \"GND\") (node (ref C2_1) (pin 2)) (node (ref C2_2) (pin 2)) (node (ref U1) (pin 4)))",
         ])
 
     lines.append("  )")

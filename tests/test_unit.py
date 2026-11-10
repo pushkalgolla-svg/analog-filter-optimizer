@@ -266,6 +266,117 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
         if out_csv.exists():
             out_csv.unlink()
 
+    def test_nrnd_murata_mpns_never_automatically_selected(self):
+        """The two NRND Murata MPNs (GRM2165C1H102JA01D and GRM2165C1H152JA01D) must never be automatically selected."""
+        part_1n = find_verified_component("C1", 1.0e-9, tol=5.0)
+        self.assertNotEqual(part_1n["mpn"], "GRM2165C1H102JA01D")
+        self.assertEqual(part_1n["mpn"], "GRM2165C2A102JA01D")
+        self.assertEqual(part_1n["status"], "Active")
+
+        part_1p5n = find_verified_component("C1", 1.5e-9, tol=5.0)
+        self.assertNotEqual(part_1p5n["mpn"], "GRM2165C1H152JA01D")
+        self.assertNotEqual(part_1p5n["mpn"], "GRM216R71H152KA01D")
+        self.assertEqual(part_1p5n["mpn"], "GRM2165C2A152JA01D")
+        self.assertEqual(part_1p5n["status"], "Active")
+
+    def test_active_replacements_selected_after_validation(self):
+        """Active replacements (100V C0G +/-5%) are selected only after specification and status validation."""
+        part_1n = find_verified_component("C1", 1.0e-9, tol=5.0)
+        self.assertEqual(part_1n["mfr"], "Murata Electronics")
+        self.assertEqual(part_1n["mpn"], "GRM2165C2A102JA01D")
+        self.assertEqual(part_1n["rating"], "100V C0G")
+        self.assertEqual(part_1n["tol_pct"], 5.0)
+        self.assertEqual(part_1n["tolerance"], "+/-5.0%")
+        self.assertEqual(part_1n["status"], "Active")
+        self.assertIn("murata.com", part_1n["ref"])
+        self.assertIn("GRM2165C2A102JA01", part_1n["ref"])
+
+        part_1p5n = find_verified_component("C1", 1.5e-9, tol=5.0)
+        self.assertEqual(part_1p5n["mfr"], "Murata Electronics")
+        self.assertEqual(part_1p5n["mpn"], "GRM2165C2A152JA01D")
+        self.assertEqual(part_1p5n["rating"], "100V C0G")
+        self.assertEqual(part_1p5n["tol_pct"], 5.0)
+        self.assertEqual(part_1p5n["tolerance"], "+/-5.0%")
+        self.assertEqual(part_1p5n["status"], "Active")
+        self.assertIn("murata.com", part_1p5n["ref"])
+        self.assertIn("GRM2165C2A152JA01", part_1p5n["ref"])
+
+        # If design requires tighter tolerance than 5% (e.g. 2%), active 5% replacements are rejected
+        part_tight = find_verified_component("C1", 1.0e-9, tol=2.0)
+        self.assertEqual(part_tight["mpn"], "Generic - MPN not verified")
+
+    def test_fourth_order_cascade_bom_counts_one_physical_ic_package(self):
+        """4th-order cascaded LPF BOM counts exactly 1 physical OPA1678 dual-channel IC package (RefDes: U1)."""
+        c4_comps = {
+            "R1_1": 14700.0, "R2_1": 14700.0, "C1_1": 1.2e-8, "C2_1": 1.0e-8,
+            "R1_2": 12700.0, "R2_2": 12700.0, "C1_2": 3.3e-8, "C2_2": 4.7e-9
+        }
+        bom = generate_bom_data("cascade4_lpf", c4_comps, r_tol=1.0, c_tol=5.0)
+        # 8 passive components + 1 physical dual op-amp IC = 9 total rows
+        self.assertEqual(len(bom), 9)
+
+        opamp_rows = [r for r in bom if r["Value"] == "OPA1678"]
+        self.assertEqual(len(opamp_rows), 1)
+        self.assertEqual(opamp_rows[0]["RefDes"], "U1")
+        self.assertEqual(opamp_rows[0]["Manufacturer Part Number"], "OPA1678IDR")
+        self.assertEqual(opamp_rows[0]["Package"], "SOIC-8")
+        self.assertIn("Dual Channel - Sections A & B", opamp_rows[0]["Description"])
+
+    def test_both_amplifier_sections_represented_in_kicad_netlist(self):
+        """4th-order cascade KiCad netlist maps Stage 1 to Section A and Stage 2 to Section B of physical package U1."""
+        c4_comps = {
+            "R1_1": 14700.0, "R2_1": 14700.0, "C1_1": 1.2e-8, "C2_1": 1.0e-8,
+            "R1_2": 12700.0, "R2_2": 12700.0, "C1_2": 3.3e-8, "C2_2": 4.7e-9
+        }
+        out_net = PROJECT_ROOT / "output" / "test_cascade_kicad.net"
+        net_str = export_kicad_netlist("cascade4_lpf", c4_comps, out_net)
+        self.assertTrue(out_net.exists())
+
+        # Verify single physical IC in components block
+        self.assertIn('(comp (ref U1) (value "OPA1678")', net_str)
+        self.assertNotIn('(comp (ref U2)', net_str)
+
+        # Verify Section A connections (pins 1, 2, 3)
+        self.assertIn('(node (ref U1) (pin 3))', net_str)  # Stage 1 INP
+        self.assertIn('(node (ref U1) (pin 1))', net_str)  # Stage 1 OUT
+        self.assertIn('(node (ref U1) (pin 2))', net_str)  # Stage 1 -IN
+
+        # Verify Section B connections (pins 5, 6, 7)
+        self.assertIn('(node (ref U1) (pin 5))', net_str)  # Stage 2 INP
+        self.assertIn('(node (ref U1) (pin 7))', net_str)  # Stage 2 OUT
+        self.assertIn('(node (ref U1) (pin 6))', net_str)  # Stage 2 -IN
+
+        # Verify ground connection (pin 4)
+        self.assertIn('(node (ref U1) (pin 4))', net_str)
+
+        if out_net.exists():
+            out_net.unlink()
+
+    def test_other_filter_topologies_retain_correct_ic_counts(self):
+        """Other filter topologies retain correct IC counts (0 for 1st-order, 1 for 2nd-order)."""
+        # 1st-order RC: 0 op-amps
+        bom_1st = generate_bom_data("1st_order_rc", {"R1": 16000.0, "C1": 1.0e-8})
+        self.assertEqual(len(bom_1st), 2)
+        self.assertEqual(len([r for r in bom_1st if r["Value"] == "OPA1678"]), 0)
+
+        # 2nd-order Sallen-Key LPF: 1 op-amp
+        bom_sk_lpf = generate_bom_data("sallen_key_lpf", {"R1": 10000.0, "R2": 22000.0, "C1": 10.0e-9, "C2": 4.7e-9})
+        self.assertEqual(len(bom_sk_lpf), 5)
+        self.assertEqual(len([r for r in bom_sk_lpf if r["Value"] == "OPA1678"]), 1)
+        self.assertEqual([r for r in bom_sk_lpf if r["Value"] == "OPA1678"][0]["RefDes"], "U1")
+
+        # 2nd-order Sallen-Key HPF: 1 op-amp
+        bom_sk_hpf = generate_bom_data("sallen_key_hpf", {"R1": 75000.0, "R2": 150000.0, "C1": 1.5e-9, "C2": 1.5e-9})
+        self.assertEqual(len(bom_sk_hpf), 5)
+        self.assertEqual(len([r for r in bom_sk_hpf if r["Value"] == "OPA1678"]), 1)
+        self.assertEqual([r for r in bom_sk_hpf if r["Value"] == "OPA1678"][0]["RefDes"], "U1")
+
+        # 2nd-order MFB BPF: 1 op-amp
+        bom_bpf = generate_bom_data("mfb_bpf", {"R1": 31600.0, "R2": 4530.0, "R3": 63400.0, "C1": 1.0e-8, "C2": 1.0e-8})
+        self.assertEqual(len(bom_bpf), 6)
+        self.assertEqual(len([r for r in bom_bpf if r["Value"] == "OPA1678"]), 1)
+        self.assertEqual([r for r in bom_bpf if r["Value"] == "OPA1678"][0]["RefDes"], "U1")
+
     def test_kicad_netlist_syntax(self):
         """Validate KiCad 8 netlist S-expression export."""
         comp_dict = {"R1": 10000.0, "R2": 22000.0, "C1": 10.0e-9, "C2": 4.7e-9}

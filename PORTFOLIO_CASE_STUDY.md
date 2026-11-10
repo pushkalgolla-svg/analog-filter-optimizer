@@ -15,7 +15,7 @@
 - Implemented a continuous Nelder-Mead optimization algorithm operating in logarithmic parameter space ($log_{10} R, log_{10} C$), normalizing 12 orders of magnitude of component scale and preventing gradient explosion.
 - Built an automated SPICE co-simulation feedback loop using portable 64-bit ngspice in console batch mode with dynamic AC sweeps and automated -3dB cutoff and quality factor (Q) extraction.
 - Developed a 100-run Monte Carlo cutoff frequency compliance engine modeling Gaussian component tolerances (±1% R, ±5% C); achieved 100% compliance within ±5% spec band and 68% within ±2% spec band.
-- Generated production-grade Bill of Materials (BOM) strictly with verified manufacturer part numbers (Yageo, Murata, TI OPA1678) and KiCad 8 schematic netlists ready for PCB layout.
+- Generated production-grade Bill of Materials (BOM) strictly with verified manufacturer part numbers (Yageo, Murata, TI OPA1678) with active lifecycle checks and multi-unit IC physical package mapping (single dual-channel SOIC-8 for 4th-order cascade), along with KiCad 8 schematic netlists ready for PCB layout.
 - Deployed an interactive web studio (Streamlit) featuring live Bode plots, interactive tolerance tuning, yield scorecards, and netlist downloads.
 ```
 
