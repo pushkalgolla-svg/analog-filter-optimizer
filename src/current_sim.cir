@@ -1,15 +1,12 @@
-* Parameterized 2nd-Order Active Sallen-Key Low-Pass Filter Template
+* Parameterized First-Order RC Low-Pass Filter Template
+* Vin is an independent AC voltage source (1V AC, 0 phase)
 Vin in 0 ac 1.0
 
-* Sallen-Key Filter Network (2nd-Order)
-R1 in n1 9.82939469e+04
-R2 n1 inp 5.19596860e+04
-C1 n1 out 3.29165182e-09
-C2 inp 0 1.51470793e-09
+* Low-Pass Filter components with parameterized values
+R1 in out 1.59515720e+04
+C1 out 0 9.76461605e-09
 
-* Unity-Gain Op-Amp Buffer (Voltage-Controlled Voltage Source, AOL = 100,000)
-Eop out 0 inp out 1e5
-
+* Control block for AC frequency sweep and automated data export
 .control
 set wr_singlescale
 ac dec 100 10 100k

@@ -66,10 +66,14 @@ def run_checks():
     assert atten_10k < -38.0, f"Expected ~ -40 dB roll-off at 10 kHz, got {atten_10k:.2f} dB"
     print("       2nd-Order -40 dB/decade roll-off confirmed. PASS!")
 
-    print("[TEST] 4. Checking EIA E-series snapping logic...")
+    print("[TEST] 4. Checking EIA E-series snapping across decade boundaries...")
     r_snap = snap_to_e_series(15075.8, "E24")
     assert r_snap in [15000.0, 16000.0]
-    print(f"       15075.8 Ohm snapped to E24: {r_snap} Ohm. PASS!")
+    # Regression: 9.99 kOhm -> 10.0 kOhm across E12, E24, E96
+    for s in ["E12", "E24", "E96"]:
+        assert snap_to_e_series(9990.0, s) == 10000.0, f"9.99 kOhm snapping failed for {s}"
+        assert snap_to_e_series(10010.0, s) == 10000.0, f"10.01 kOhm snapping failed for {s}"
+    print(f"       15075.8 Ohm snapped to E24: {r_snap} Ohm; 9.99k & 10.01k snapped to 10k across all series. PASS!")
 
     print("[TEST] 5. Checking 1st-order commercial pair search...")
     r_c1, c_c1, fc_c1, err_c1 = find_commercial_pair_1st_order(1000.0, "E24", "E12")

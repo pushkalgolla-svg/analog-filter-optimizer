@@ -1,11 +1,11 @@
-# ML-Based Analog Filter Synthesizer & SPICE Verification Studio
+# Analog Filter Synthesizer & SPICE Verification Studio
 
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/)
 [![SPICE](https://img.shields.io/badge/SPICE-ngspice_47-red.svg)](http://ngspice.sourceforge.net/)
 [![EDA](https://img.shields.io/badge/EDA-KiCad_8_Ready-green.svg)](https://www.kicad.org/)
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://pushkal-filter-studio.streamlit.app/)
 
-An end-to-end analog active and passive filter synthesis engine powered by numerical optimization (`scipy.optimize.minimize`), direct SPICE simulation verification (`ngspice`), automated commercial component snapping (E12, E24, E96), statistical Monte Carlo manufacturing yield analysis, production BOM generation, KiCad schematic export, and an interactive web studio.
+An end-to-end analog active and passive filter synthesis engine powered by continuous numerical optimization (SciPy Nelder-Mead simplex), direct SPICE simulation verification (`ngspice`), automated commercial component snapping across decade boundaries (E12, E24, E96), statistical Monte Carlo cutoff frequency compliance analysis, verified manufacturing BOM generation, KiCad schematic export, and an interactive web studio.
 
 🌐 **Live Web Application**: [https://pushkal-filter-studio.streamlit.app/](https://pushkal-filter-studio.streamlit.app/)
 
@@ -26,12 +26,13 @@ An end-to-end analog active and passive filter synthesis engine powered by numer
   - Nelder-Mead simplex algorithm operating in logarithmic component space ($\log_{10} R, \log_{10} C$) to prevent scaling issues and guarantee positive component values.
 - **Coupled Commercial Snapping**:
   - Discrete coupled grid search pairing standard E12/E24 capacitors with closest standard E96 resistors to maintain $< 0.15\%$ cutoff error.
-- **Statistical Monte Carlo Sensitivity & Yield Analysis**:
+- **Statistical Monte Carlo Sensitivity & Compliance Analysis**:
   - $N$-trial batch SPICE simulation modeling component manufacturing tolerances (Gaussian distribution with $3\sigma = \text{tolerance}$).
-  - Computes $\mu$, $\sigma$, $95\%$ confidence interval, and manufacturing yield against $\pm 2\%$ and $\pm 5\%$ specification windows.
+  - Computes sample mean ($\mu$), sample standard deviation ($s$), Mean 95% Confidence Interval ($\mu \pm 1.96 \cdot s/\sqrt{N}$), Approximate 95% Distribution Band ($\mu \pm 1.96s$), and Empirical 95% Percentile Interval ($[P_{2.5}, P_{97.5}]$).
+  - Evaluates Cutoff Frequency Compliance Yield against $\pm 2\%$ and $\pm 5\%$ specification windows (clearly identified as measuring cutoff frequency tolerance compliance, distinct from full board manufacturing yield).
 - **Production BOM & KiCad 8 Export**:
-  - Generates CSV Bill of Materials with real manufacturer part numbers (Yageo, Murata, Texas Instruments OPA1678).
-  - Generates standard KiCad schematic netlists (`.net`) for PCB design.
+  - Generates CSV Bill of Materials strictly from verified manufacturer part catalogues (Yageo, Murata, Texas Instruments OPA1678) or labels non-catalogue values explicitly as `Generic - MPN not verified` (no fabricated part numbers).
+  - Generates standard KiCad schematic netlists (`.net`) for PCB layout import.
 - **Interactive Web Studio**:
   - Modern Streamlit UI with live frequency tuning, interactive Bode plots, Monte Carlo yield gauges, and one-click BOM/netlist downloads.
 
@@ -56,7 +57,7 @@ analog_filter_synthesis/
 │   ├── export_manufacturing.py    # BOM CSV and KiCad netlist exporter
 │   └── test_pipeline.py           # Self-contained regression test suite (11 automated checks)
 ├── output/
-│   ├── sim_data.txt               # Raw 401-point AC frequency sweep data (continuous ML)
+│   ├── sim_data.txt               # Raw 401-point AC frequency sweep data (continuous optimal Nelder-Mead)
 │   ├── sim_data_commercial.txt    # Raw 401-point AC frequency sweep data (commercial EIA)
 │   ├── bode_plot.png              # Bode magnitude response plot
 │   ├── monte_carlo_yield.png      # Monte Carlo yield distribution histogram

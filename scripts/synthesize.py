@@ -1,9 +1,10 @@
 """
-Analog Filter Synthesizer, Optimizer, and Monte Carlo Tolerance Analysis Pipeline.
+Analog Filter Synthesizer, Numerical Optimizer, and Monte Carlo Tolerance Analysis Pipeline.
 
 Synthesizes analog filters to hit target cutoff frequency (fc) and Butterworth damping
-using SPICE simulation in the loop, with automated EIA commercial component snapping
-(E12, E24, E96), statistical Monte Carlo yield analysis, BOM generation, and KiCad export.
+using numerical optimization (SciPy Nelder-Mead) with SPICE simulation in the loop,
+automated EIA commercial component snapping (E12, E24, E96), statistical Monte Carlo
+cutoff frequency yield analysis, BOM generation with verified catalog components, and KiCad export.
 
 Supported topologies:
 1. 1st-Order Passive RC Low-Pass Filter (-20 dB/dec)
@@ -68,12 +69,35 @@ E_SERIES = {
 
 
 def snap_to_e_series(value, series="E24"):
-    """Snaps an arbitrary component value to the nearest standard E-series multiplier."""
-    table = E_SERIES.get(series.upper(), E_SERIES["E24"])
-    decade = 10.0 ** np.floor(np.log10(value))
-    normalized = value / decade
-    idx = int(np.argmin(np.abs(np.array(table) - normalized)))
-    return float(table[idx] * decade)
+    """
+    Snaps an arbitrary component value to the nearest standard E-series value.
+    Considers candidates across the previous, current, and next decades to correctly
+    handle decade boundaries (e.g. 9.99 kOhm -> 10.0 kOhm).
+    Safely validates inputs: raises ValueError for non-positive, zero, NaN, or infinite inputs.
+    """
+    if not isinstance(value, (int, float, np.number)):
+        raise TypeError(f"Component value must be numeric, got {type(value).__name__}")
+    if math.isnan(value) or math.isinf(value) or value <= 0:
+        raise ValueError(f"Invalid component value for E-series snapping: {value}. Must be a finite positive number.")
+
+    series_key = str(series).upper()
+    if series_key not in E_SERIES:
+        raise ValueError(f"Unsupported E-series: '{series}'. Must be one of {list(E_SERIES.keys())}.")
+    table = E_SERIES[series_key]
+
+    d = int(math.floor(math.log10(value)))
+    candidates = []
+    # Span previous (d-1), current (d), and next (d+1) decades
+    for dec_exp in (d - 1, d, d + 1):
+        dec = 10.0 ** dec_exp
+        for m in table:
+            c = float(f"{m * dec:.12g}")
+            candidates.append(c)
+
+    candidates = np.array(candidates)
+    diffs = np.abs(candidates - value)
+    best_idx = int(np.argmin(diffs))
+    return float(candidates[best_idx])
 
 
 def format_eng(val, unit=""):
@@ -325,6 +349,7 @@ def loss_function(params, order=1, filter_type="lpf", ngspice_bin=None, fallback
 
 # Commercial Snapping Algorithms
 def find_commercial_pair_1st_order(target_fc, r_series="E24", c_series="E12"):
+    """Finds best commercial (R, C) pair for 1st-order passive RC filter."""
     c_table = E_SERIES.get(c_series.upper(), E_SERIES["E12"])
     best = None
     min_err = float("inf")
@@ -342,6 +367,7 @@ def find_commercial_pair_1st_order(target_fc, r_series="E24", c_series="E12"):
 
 
 def find_commercial_components_2nd_order(target_fc, r_series="E96", c_series="E12"):
+    """Finds standard components (R1, R2, C1, C2) for 2nd-order Sallen-Key Butterworth LPF."""
     c_table = E_SERIES.get(c_series.upper(), E_SERIES["E12"])
     c2_candidates = [m * (10.0 ** exp) for exp in range(-10, -6) for m in c_table]
     best = None
@@ -371,6 +397,7 @@ def find_commercial_components_2nd_order(target_fc, r_series="E96", c_series="E1
 
 
 def find_commercial_hpf(target_fc, r_series="E96", c_series="E12"):
+    """Finds standard components (R1, R2, C1, C2) for 2nd-order Sallen-Key Butterworth HPF."""
     c_table = E_SERIES.get(c_series.upper(), E_SERIES["E12"])
     c_candidates = [m * (10.0 ** exp) for exp in range(-10, -6) for m in c_table]
     best = None
@@ -391,6 +418,7 @@ def find_commercial_hpf(target_fc, r_series="E96", c_series="E12"):
 
 
 def find_commercial_bpf(target_fc, target_q=2.0, r_series="E96", c_series="E12"):
+    """Finds standard components (R1, R2, R3, C1, C2) for 2nd-order MFB Band-Pass filter."""
     c_table = E_SERIES.get(c_series.upper(), E_SERIES["E12"])
     c_candidates = [m * (10.0 ** exp) for exp in range(-10, -6) for m in c_table]
     best = None
@@ -417,9 +445,9 @@ def find_commercial_bpf(target_fc, target_q=2.0, r_series="E96", c_series="E12")
 
 
 def find_commercial_cascade4(target_fc, r_series="E96", c_series="E12"):
+    """Finds standard components for 4th-order cascaded Sallen-Key Butterworth LPF."""
     q1 = 0.5412
     q2 = 1.3065
-    c_table = E_SERIES.get(c_series.upper(), E_SERIES["E12"])
 
     # Stage 1: Q1 = 0.5412
     c2_1 = 10e-9
@@ -436,6 +464,194 @@ def find_commercial_cascade4(target_fc, r_series="E96", c_series="E12"):
     r2_2 = r1_2
 
     return (r1_1, r2_1, c1_1, c2_1, r1_2, r2_2, c1_2, c2_2)
+
+
+def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, target_q=None,
+                      r_series="E96", c_series="E12", ngspice_bin=None, fallback=False,
+                      r_tol=None, c_tol=5.0, progress_callback=None):
+    """
+    Unified synthesis and optimization pipeline shared by both CLI and Streamlit GUI.
+    1. Validates inputs safely.
+    2. Runs continuous numerical optimization (Nelder-Mead simplex) in log10 space.
+    3. Performs coupled EIA standard commercial component snapping.
+    4. Simulates and verifies both continuous and snapped designs in SPICE.
+    5. Exports verified Bill of Materials (BOM) and KiCad schematic netlists.
+    """
+    if not isinstance(target_fc, (int, float, np.number)) or math.isnan(target_fc) or math.isinf(target_fc) or target_fc <= 0:
+        raise ValueError(f"Target frequency must be a finite positive number, got: {target_fc}")
+
+    filter_type = str(filter_type).lower()
+    if filter_type not in ["lpf", "hpf", "bpf"]:
+        raise ValueError(f"Unsupported filter type: '{filter_type}'. Must be 'lpf', 'hpf', or 'bpf'.")
+
+    order = int(order)
+    if filter_type == "lpf" and order not in [1, 2, 4]:
+        raise ValueError(f"Unsupported order for LPF: {order}. Must be 1, 2, or 4.")
+    if filter_type in ["hpf", "bpf"]:
+        order = 2
+
+    r_series = str(r_series).upper()
+    if r_series not in E_SERIES:
+        raise ValueError(f"Unsupported resistor series: '{r_series}'. Must be E12, E24, or E96.")
+    c_series = "E12"
+
+    if target_q is None:
+        target_q = 2.0 if filter_type == "bpf" else BUTTERWORTH_Q
+
+    if r_tol is None:
+        r_tol = 1.0 if r_series == "E96" else 5.0
+
+    if ngspice_bin is None:
+        ngspice_bin = find_ngspice()
+    use_fallback = fallback or not ngspice_bin
+
+    # Initial parameter configuration
+    if filter_type == "lpf":
+        if order == 1:
+            initial_params = [10000.0, 10.0e-9]
+            comp_names = ["R1", "C1"]
+            top_key = "1st_order_rc"
+        elif order == 2:
+            initial_params = [10000.0, 10000.0, 22.0e-9, 10.0e-9]
+            comp_names = ["R1", "R2", "C1", "C2"]
+            top_key = "sallen_key_lpf"
+        elif order == 4:
+            initial_params = [15000.0, 15000.0, 12e-9, 10e-9, 20000.0, 20000.0, 33e-9, 4.7e-9]
+            comp_names = ["R1_1", "R2_1", "C1_1", "C2_1", "R1_2", "R2_2", "C1_2", "C2_2"]
+            top_key = "cascade4_lpf"
+    elif filter_type == "hpf":
+        initial_params = [12000.0, 24000.0, 10.0e-9, 10.0e-9]
+        comp_names = ["R1", "R2", "C1", "C2"]
+        top_key = "sallen_key_hpf"
+    elif filter_type == "bpf":
+        initial_params = [30000.0, 4500.0, 60000.0, 10.0e-9, 10.0e-9]
+        comp_names = ["R1", "R2", "R3", "C1", "C2"]
+        top_key = "mfb_bpf"
+
+    x0 = [np.log10(p) for p in initial_params]
+    init_fc, init_q, init_err = loss_function(
+        initial_params, order=order, filter_type=filter_type,
+        ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q
+    )
+
+    # Stage 1: Continuous Numerical Optimization (Nelder-Mead)
+    iteration_count = [0]
+    if filter_type == "lpf" and order == 4:
+        q1 = 0.5412
+        q2 = 1.3065
+        c2_1 = 10e-9
+        c1_1 = 4.0 * (q1 ** 2) * c2_1
+        r_1 = 1.0 / (4.0 * math.pi * target_fc * q1 * c2_1)
+        c2_2 = 4.7e-9
+        c1_2 = 4.0 * (q2 ** 2) * c2_2
+        r_2 = 1.0 / (4.0 * math.pi * target_fc * q2 * c2_2)
+        opt_params = [r_1, r_1, c1_1, c2_1, r_2, r_2, c1_2, c2_2]
+        opt_iterations = 0
+    else:
+        def optimizer_objective(log_params):
+            iteration_count[0] += 1
+            params = [10.0 ** p for p in log_params]
+            fc, q, err = loss_function(
+                params, order=order, filter_type=filter_type,
+                ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q
+            )
+            if progress_callback:
+                progress_callback(iteration_count[0], fc, q, err)
+            return err
+
+        res = minimize(
+            optimizer_objective, x0, method="Nelder-Mead",
+            options={"maxiter": 300, "xatol": 1e-4, "fatol": 1e-4}
+        )
+        opt_params = [10.0 ** p for p in res.x]
+        opt_iterations = res.nit
+
+    final_fc_opt, final_q_opt, _ = loss_function(
+        opt_params, order=order, filter_type=filter_type,
+        ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q,
+        output_data_file=SIM_DATA_PATH
+    )
+    freqs_opt, mags_opt = parse_simulation_data(SIM_DATA_PATH)
+
+    # Stage 2: Hardware E-Series Snapping
+    if filter_type == "lpf":
+        if order == 1:
+            comm_r, comm_c, _, _ = find_commercial_pair_1st_order(target_fc, r_series=r_series, c_series=c_series)
+            comm_params = [comm_r, comm_c]
+        elif order == 2:
+            comm_r1, comm_r2, comm_c1, comm_c2, _, _ = find_commercial_components_2nd_order(target_fc, r_series=r_series, c_series=c_series)
+            comm_params = [comm_r1, comm_r2, comm_c1, comm_c2]
+        elif order == 4:
+            comm_params = list(find_commercial_cascade4(target_fc, r_series=r_series, c_series=c_series))
+    elif filter_type == "hpf":
+        comm_r1, comm_r2, comm_c1, comm_c2, _, _ = find_commercial_hpf(target_fc, r_series=r_series, c_series=c_series)
+        comm_params = [comm_r1, comm_r2, comm_c1, comm_c2]
+    elif filter_type == "bpf":
+        comm_r1, comm_r2, comm_r3, comm_c1, comm_c2, _, _ = find_commercial_bpf(target_fc, target_q=target_q, r_series=r_series, c_series=c_series)
+        comm_params = [comm_r1, comm_r2, comm_r3, comm_c1, comm_c2]
+
+    final_fc_comm, final_q_comm, _ = loss_function(
+        comm_params, order=order, filter_type=filter_type,
+        ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q,
+        output_data_file=COMMERCIAL_SIM_DATA_PATH
+    )
+    freqs_comm, mags_comm = parse_simulation_data(COMMERCIAL_SIM_DATA_PATH)
+
+    if filter_type == "bpf":
+        _, _, bandwidth_comm = extract_cutoff_frequency(freqs_comm, mags_comm, filter_type="bpf")
+    else:
+        bandwidth_comm = 0.0
+
+    pct_err_opt = abs(final_fc_opt - target_fc) / target_fc * 100.0
+    pct_err_comm = abs(final_fc_comm - target_fc) / target_fc * 100.0
+
+    # Stage 3: Export BOM & KiCad Netlist
+    comp_dict = {name: val for name, val in zip(comp_names, comm_params)}
+    bom_rows = generate_bom_data(top_key, comp_dict, r_tol=r_tol, c_tol=c_tol)
+    bom_csv_path = OUTPUT_DIR / f"BOM_{top_key}.csv"
+    export_bom_csv(bom_rows, bom_csv_path)
+
+    kicad_net_path = OUTPUT_DIR / f"{top_key}_kicad.net"
+    kicad_text = export_kicad_netlist(top_key, comp_dict, kicad_net_path)
+
+    current_spice_text = CURRENT_SIM_PATH.read_text(encoding="utf-8") if CURRENT_SIM_PATH.exists() else ""
+
+    return {
+        "success": True,
+        "filter_type": filter_type,
+        "order": order,
+        "top_key": top_key,
+        "target_fc": float(target_fc),
+        "target_q": float(target_q),
+        "r_series": r_series,
+        "c_series": c_series,
+        "r_tol": float(r_tol),
+        "c_tol": float(c_tol),
+        "comp_names": comp_names,
+        "initial_params": initial_params,
+        "init_fc": float(init_fc),
+        "init_q": float(init_q),
+        "opt_iterations": opt_iterations,
+        "opt_params": [float(p) for p in opt_params],
+        "final_fc_opt": float(final_fc_opt),
+        "final_q_opt": float(final_q_opt),
+        "pct_err_opt": float(pct_err_opt),
+        "freqs_opt": freqs_opt,
+        "mags_opt": mags_opt,
+        "comm_params": [float(p) for p in comm_params],
+        "final_fc_comm": float(final_fc_comm),
+        "final_q_comm": float(final_q_comm),
+        "bandwidth_comm": float(bandwidth_comm),
+        "pct_err_comm": float(pct_err_comm),
+        "freqs_comm": freqs_comm,
+        "mags_comm": mags_comm,
+        "bom_rows": bom_rows,
+        "bom_csv_path": bom_csv_path,
+        "kicad_net_path": kicad_net_path,
+        "kicad_text": kicad_text,
+        "spice_text": current_spice_text,
+        "sim_engine": "ngspice" if not use_fallback else "analytical",
+    }
 
 
 def generate_bode_plot(freqs_opt, mags_opt, target_fc, achieved_fc_opt,
@@ -463,7 +679,7 @@ def generate_bode_plot(freqs_opt, mags_opt, target_fc, achieved_fc_opt,
         title_name = "2nd-Order MFB Band-Pass"
 
     ax.semilogx(freqs_opt, mags_opt, color="#1f77b4", linewidth=2.5,
-                label=f"Continuous ML: {achieved_fc_opt:.1f} Hz ({slope_label})")
+                label=f"Continuous Optimal: {achieved_fc_opt:.1f} Hz ({slope_label})")
 
     if freqs_comm is not None and mags_comm is not None:
         ax.semilogx(freqs_comm, mags_comm, color="#2ca02c", linestyle="--", linewidth=2.0,
@@ -498,9 +714,12 @@ def generate_bode_plot(freqs_opt, mags_opt, target_fc, achieved_fc_opt,
 def run_monte_carlo_analysis(comm_params, order=1, filter_type="lpf", target_fc=TARGET_CUTOFF_HZ,
                              r_tol=1.0, c_tol=5.0, trials=100, target_q=BUTTERWORTH_Q,
                              ngspice_bin=None, fallback=False, output_plot=MC_PLOT_PATH):
-    """Executes N statistical Monte Carlo SPICE simulations with Gaussian component variations."""
-    print(f"\nRunning {trials} Monte Carlo statistical SPICE simulations...")
-    print(f"Component Tolerances: Resistors = +/-{r_tol}%, Capacitors = +/-{c_tol}%")
+    """
+    Executes N statistical Monte Carlo SPICE simulations with Gaussian component variations.
+    Accurately computes cutoff-frequency compliance yield and statistical coverage intervals.
+    """
+    print(f"\nRunning {trials} Monte Carlo statistical SPICE simulations...", flush=True)
+    print(f"Assumed Component Tolerances: Resistors = +/-{r_tol}%, Capacitors = +/-{c_tol}%", flush=True)
 
     mc_temp_file = OUTPUT_DIR / "mc_temp_sim.txt"
     fcs = []
@@ -532,7 +751,7 @@ def run_monte_carlo_analysis(comm_params, order=1, filter_type="lpf", target_fc=
             qs.append(q)
 
         if (i + 1) % 25 == 0 or (i + 1) == trials:
-            print(f"  Completed {i + 1:3d}/{trials} trials...")
+            print(f"  Completed {i + 1:3d}/{trials} trials...", flush=True)
 
     if mc_temp_file.exists():
         mc_temp_file.unlink()
@@ -540,24 +759,35 @@ def run_monte_carlo_analysis(comm_params, order=1, filter_type="lpf", target_fc=
     fcs = np.array(fcs)
     qs = np.array(qs) if (order == 2 or filter_type == "bpf") else None
 
-    yield_2pct = np.sum(np.abs(fcs - target_fc) <= 0.02 * target_fc) / trials * 100.0
-    yield_5pct = np.sum(np.abs(fcs - target_fc) <= 0.05 * target_fc) / trials * 100.0
+    # Cutoff Frequency Compliance Yield
+    yield_2pct = float(np.sum(np.abs(fcs - target_fc) <= 0.02 * target_fc) / trials * 100.0)
+    yield_5pct = float(np.sum(np.abs(fcs - target_fc) <= 0.05 * target_fc) / trials * 100.0)
+
+    # Statistical intervals
+    mu_fc = float(np.mean(fcs))
+    std_fc = float(np.std(fcs, ddof=1)) if len(fcs) > 1 else float(np.std(fcs))
+    se_fc = std_fc / math.sqrt(trials)
+    ci_mean_low = mu_fc - 1.96 * se_fc
+    ci_mean_high = mu_fc + 1.96 * se_fc
+    dist_band_low = mu_fc - 1.96 * std_fc
+    dist_band_high = mu_fc + 1.96 * std_fc
+    p2_5 = float(np.percentile(fcs, 2.5))
+    p97_5 = float(np.percentile(fcs, 97.5))
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5), dpi=300)
 
     # Histogram 1: Cutoff / Center Frequency
     ax1.hist(fcs, bins=22, color="#1f77b4", edgecolor="black", alpha=0.7, density=True)
-    mu_fc, std_fc = np.mean(fcs), np.std(fcs)
     std_safe = max(std_fc, 1e-6)
     x_grid = np.linspace(min(fcs) - 20, max(fcs) + 20, 200)
     pdf = (1.0 / (std_safe * np.sqrt(2.0 * np.pi))) * np.exp(-0.5 * ((x_grid - mu_fc) / std_safe) ** 2)
-    ax1.plot(x_grid, pdf, color="#0b407a", linewidth=2.0, label=f"Gaussian Fit ($\\mu$={mu_fc:.1f}Hz, $\\sigma$={std_fc:.1f}Hz)")
+    ax1.plot(x_grid, pdf, color="#0b407a", linewidth=2.0, label=f"Gaussian Fit ($\\mu$={mu_fc:.1f}Hz, s={std_fc:.1f}Hz)")
 
     ax1.axvline(target_fc, color="#d62728", linestyle="--", linewidth=2.0, label=f"Target ({target_fc:.0f} Hz)")
-    ax1.axvspan(target_fc * 0.98, target_fc * 1.02, color="#2ca02c", alpha=0.25, label=f"±2% Spec Band (Yield: {yield_2pct:.1f}%)")
-    ax1.axvspan(target_fc * 0.95, target_fc * 1.05, color="#2ca02c", alpha=0.10, label=f"±5% Spec Band (Yield: {yield_5pct:.1f}%)")
+    ax1.axvspan(target_fc * 0.98, target_fc * 1.02, color="#2ca02c", alpha=0.25, label=f"±2% Spec Band (Compliance: {yield_2pct:.1f}%)")
+    ax1.axvspan(target_fc * 0.95, target_fc * 1.05, color="#2ca02c", alpha=0.10, label=f"±5% Spec Band (Compliance: {yield_5pct:.1f}%)")
 
-    ax1.set_title(f"Monte Carlo Frequency Distribution ({trials} Runs)\nResistors: ±{r_tol}%, Capacitors: ±{c_tol}%", fontsize=11, pad=12)
+    ax1.set_title(f"Monte Carlo Frequency Distribution ({trials} Runs)\nAssumed Tolerances: Resistors ±{r_tol}%, Capacitors ±{c_tol}%", fontsize=11, pad=12)
     ax1.set_xlabel("Frequency (Hz)", fontsize=10, fontweight="bold")
     ax1.set_ylabel("Probability Density", fontsize=10, fontweight="bold")
     ax1.legend(loc="upper right", frameon=True, fontsize=8.5)
@@ -566,13 +796,14 @@ def run_monte_carlo_analysis(comm_params, order=1, filter_type="lpf", target_fc=
     # Subplot 2: Q factor or CDF
     if qs is not None:
         ax2.hist(qs, bins=22, color="#ff7f0e", edgecolor="black", alpha=0.7, density=True)
-        mu_q, std_q = np.mean(qs), np.std(qs)
+        mu_q = float(np.mean(qs))
+        std_q = float(np.std(qs, ddof=1)) if len(qs) > 1 else float(np.std(qs))
         std_q_safe = max(std_q, 1e-6)
         xq_grid = np.linspace(min(qs) - 0.05, max(qs) + 0.05, 200)
         pdf_q = (1.0 / (std_q_safe * np.sqrt(2.0 * np.pi))) * np.exp(-0.5 * ((xq_grid - mu_q) / std_q_safe) ** 2)
-        ax2.plot(xq_grid, pdf_q, color="#b35400", linewidth=2.0, label=f"Gaussian Fit ($\\mu$={mu_q:.4f}, $\\sigma$={std_q:.4f})")
+        ax2.plot(xq_grid, pdf_q, color="#b35400", linewidth=2.0, label=f"Gaussian Fit ($\\mu_Q$={mu_q:.4f}, $s_Q$={std_q:.4f})")
         ax2.axvline(target_q, color="#d62728", linestyle="--", linewidth=2.0, label=f"Target Q ({target_q:.4f})")
-        ax2.set_title(f"Monte Carlo Quality Factor (Q) Distribution\n$\\mu_Q$ = {mu_q:.4f}, $\\sigma_Q$ = {std_q:.4f}", fontsize=11, pad=12)
+        ax2.set_title(f"Monte Carlo Quality Factor (Q) Distribution\n$\\mu_Q$ = {mu_q:.4f}, $s_Q$ = {std_q:.4f}", fontsize=11, pad=12)
         ax2.set_xlabel("Quality Factor (Q)", fontsize=10, fontweight="bold")
         ax2.set_ylabel("Probability Density", fontsize=10, fontweight="bold")
         ax2.legend(loc="upper right", frameon=True, fontsize=8.5)
@@ -583,7 +814,7 @@ def run_monte_carlo_analysis(comm_params, order=1, filter_type="lpf", target_fc=
         ax2.plot(sorted_fcs, cdf, color="#2ca02c", linewidth=2.5, label="Empirical CDF")
         ax2.axvline(target_fc, color="#d62728", linestyle="--", label=f"Target ({target_fc:.0f} Hz)")
         ax2.axhline(50.0, color="#7f7f7f", linestyle=":", alpha=0.7)
-        ax2.set_title("Cumulative Yield Distribution Curve", fontsize=11, pad=12)
+        ax2.set_title("Cumulative Frequency Distribution Curve", fontsize=11, pad=12)
         ax2.set_xlabel("Frequency (Hz)", fontsize=10, fontweight="bold")
         ax2.set_ylabel("Cumulative Probability (%)", fontsize=10, fontweight="bold")
         ax2.legend(loc="lower right", frameon=True, fontsize=9.0)
@@ -594,29 +825,33 @@ def run_monte_carlo_analysis(comm_params, order=1, filter_type="lpf", target_fc=
     plt.savefig(output_plot, dpi=300)
     plt.close()
 
-    print("\n" + "=" * 76)
-    print("            MONTE CARLO MANUFACTURING YIELD & SENSITIVITY REPORT           ")
-    print("=" * 76)
-    print(f"Number of Statistical Trials:   {trials} SPICE simulations")
-    print(f"Component Tolerances:           Resistors: +/-{r_tol:.1f}% | Capacitors: +/-{c_tol:.1f}%")
-    print(f"Cutoff Frequency Mean (mu):     {mu_fc:.2f} Hz")
-    print(f"Cutoff Standard Deviation (s):  {std_fc:.2f} Hz")
-    print(f"Cutoff 95% Confidence Interval: [{mu_fc - 1.96*std_fc:.2f} Hz, {mu_fc + 1.96*std_fc:.2f} Hz]")
-    print(f"Extreme Frequency Range:        [{np.min(fcs):.2f} Hz, {np.max(fcs):.2f} Hz]")
+    print("\n" + "=" * 76, flush=True)
+    print("       MONTE CARLO COMPONENT TOLERANCE & FREQUENCY YIELD REPORT            ", flush=True)
+    print("=" * 76, flush=True)
+    print(f"Number of Statistical Trials:   {trials} SPICE simulations", flush=True)
+    print(f"Assumed Component Tolerances:   Resistors: +/-{r_tol:.1f}% | Capacitors: +/-{c_tol:.1f}%", flush=True)
+    print(f"Cutoff Frequency Mean (mu):     {mu_fc:.2f} Hz", flush=True)
+    print(f"Cutoff Sample Std Dev (s):      {std_fc:.2f} Hz", flush=True)
+    print(f"Mean 95% Confidence Interval:   [{ci_mean_low:.2f} Hz, {ci_mean_high:.2f} Hz] (mu +/- 1.96*s/sqrt(N))", flush=True)
+    print(f"Approx. 95% Distribution Band:  [{dist_band_low:.2f} Hz, {dist_band_high:.2f} Hz] (mu +/- 1.96*s)", flush=True)
+    print(f"Empirical 95% Interval:         [{p2_5:.2f} Hz, {p97_5:.2f} Hz] (2.5th to 97.5th percentile)", flush=True)
+    print(f"Extreme Frequency Range:        [{np.min(fcs):.2f} Hz, {np.max(fcs):.2f} Hz]", flush=True)
     if qs is not None:
-        print(f"Quality Factor Q Mean (mu):     {np.mean(qs):.4f} (Target: {target_q:.4f})")
-        print(f"Quality Factor Q Std Dev:       {np.std(qs):.4f}")
-    print("-" * 76)
-    print(f"Manufacturing Yield (+/-2% Spec Band): {yield_2pct:6.2f} %")
-    print(f"Manufacturing Yield (+/-5% Spec Band): {yield_5pct:6.2f} %")
-    print(f"Monte Carlo Yield Plot Saved:   {output_plot}")
-    print("=" * 76 + "\n")
+        print(f"Quality Factor Q Mean (mu):     {np.mean(qs):.4f} (Target: {target_q:.4f})", flush=True)
+        print(f"Quality Factor Q Sample Std Dev:{np.std(qs, ddof=1):.4f}", flush=True)
+    print("-" * 76, flush=True)
+    print(f"Cutoff Compliance Yield (+/-2% Spec Band): {yield_2pct:6.2f} %", flush=True)
+    print(f"Cutoff Compliance Yield (+/-5% Spec Band): {yield_5pct:6.2f} %", flush=True)
+    print("(Note: Yield evaluates cutoff-frequency tolerance compliance only;", flush=True)
+    print(" does not model PCB parasitics, component derating, or assembly defects.)", flush=True)
+    print(f"Monte Carlo Yield Plot Saved:   {output_plot}", flush=True)
+    print("=" * 76 + "\n", flush=True)
 
     return fcs, qs, yield_2pct, yield_5pct
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Analog Filter Synthesizer via SPICE and SciPy Optimization")
+    parser = argparse.ArgumentParser(description="Analog Filter Synthesizer via SPICE and SciPy Numerical Optimization")
     parser.add_argument("--type", type=str, default="lpf", choices=["lpf", "hpf", "bpf"], help="Filter type: lpf, hpf, bpf (default: lpf)")
     parser.add_argument("--order", type=int, default=1, choices=[1, 2, 4], help="Filter order (1, 2, or 4 for LPF; 2 for HPF/BPF)")
     parser.add_argument("--target-fc", type=float, default=TARGET_CUTOFF_HZ, help="Target cutoff / center frequency in Hz")
@@ -636,7 +871,6 @@ def main():
     target_fc = args.target_fc
     r_series = args.series.upper()
     c_series = "E12"
-
     target_q = args.q if args.q is not None else (2.0 if filter_type == "bpf" else BUTTERWORTH_Q)
 
     if args.r_tol is not None:
@@ -649,149 +883,71 @@ def main():
     use_fallback = args.fallback or not ngspice_bin
 
     if ngspice_bin and not use_fallback:
-        print(f"[INFO] Using SPICE simulator: {ngspice_bin}")
+        print(f"[INFO] Using SPICE simulator: {ngspice_bin}", flush=True)
     else:
-        print("[INFO] Running in analytical SPICE mode.")
+        print("[INFO] Running in analytical SPICE mode.", flush=True)
 
-    print("\n" + "=" * 76)
+    print("\n" + "=" * 76, flush=True)
     if filter_type == "lpf":
         type_title = f"{order}TH-ORDER PASSIVE RC" if order == 1 else f"{order}ND-ORDER ACTIVE SALLEN-KEY (BUTTERWORTH)" if order == 2 else "4TH-ORDER CASCADED SALLEN-KEY (BUTTERWORTH)"
     elif filter_type == "hpf":
         type_title = "2ND-ORDER ACTIVE SALLEN-KEY HIGH-PASS (BUTTERWORTH)"
     elif filter_type == "bpf":
         type_title = f"2ND-ORDER ACTIVE MULTIPLE-FEEDBACK BAND-PASS (Q={target_q:.2f})"
-    print(f"      ML-BASED {type_title} FILTER SYNTHESIZER      ")
-    print("=" * 76)
-    print(f"Target Frequency (-3dB or Center): {target_fc:.2f} Hz")
-    print(f"Commercial Series Selection:       Resistors: {r_series} | Capacitors: {c_series}")
+    print(f"      NUMERICAL OPTIMIZATION-BASED {type_title} FILTER SYNTHESIZER      ", flush=True)
+    print("=" * 76, flush=True)
+    print(f"Target Frequency (-3dB or Center): {target_fc:.2f} Hz", flush=True)
+    print(f"Commercial Series Selection:       Resistors: {r_series} | Capacitors: {c_series}", flush=True)
 
-    # Set up initial parameters
-    if filter_type == "lpf":
-        if order == 1:
-            initial_params = [10000.0, 10.0e-9]
-            comp_names = ["R1", "C1"]
-            top_key = "1st_order_rc"
-        elif order == 2:
-            initial_params = [10000.0, 10000.0, 22.0e-9, 10.0e-9]
-            comp_names = ["R1", "R2", "C1", "C2"]
-            top_key = "sallen_key_lpf"
-        elif order == 4:
-            initial_params = [15000.0, 15000.0, 12e-9, 10e-9, 20000.0, 20000.0, 33e-9, 4.7e-9]
-            comp_names = ["R1_1", "R2_1", "C1_1", "C2_1", "R1_2", "R2_2", "C1_2", "C2_2"]
-            top_key = "cascade4_lpf"
-    elif filter_type == "hpf":
-        initial_params = [12000.0, 24000.0, 10.0e-9, 10.0e-9]
-        comp_names = ["R1", "R2", "C1", "C2"]
-        top_key = "sallen_key_hpf"
-    elif filter_type == "bpf":
-        initial_params = [30000.0, 4500.0, 60000.0, 10.0e-9, 10.0e-9]
-        comp_names = ["R1", "R2", "R3", "C1", "C2"]
-        top_key = "mfb_bpf"
+    def print_progress(step, fc, q, err):
+        if step % 10 == 0 or step == 1:
+            print(f"  Step {step:3d} | fc = {fc:8.2f} Hz | Q = {q:.3f} | Error = {err:10.2e}", flush=True)
 
-    x0 = [np.log10(p) for p in initial_params]
-    init_fc, init_q, init_err = loss_function(initial_params, order=order, filter_type=filter_type, ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q)
-    print(f"Initial Frequency:                 {init_fc:.2f} Hz")
-    if order == 2 or filter_type == "bpf":
-        print(f"Initial Quality Factor (Q):        {init_q:.4f}")
-    print(f"Initial Error:                     {init_err:.4e}")
     print("-" * 76, flush=True)
-    print("Stage 1: Running continuous ML optimization (Nelder-Mead simplex)...", flush=True)
+    print("Stage 1: Running continuous numerical optimization (Nelder-Mead simplex)...", flush=True)
 
-    if filter_type == "lpf" and order == 4:
-        q1 = 0.5412
-        q2 = 1.3065
-        c2_1 = 10e-9
-        c1_1 = 4.0 * (q1 ** 2) * c2_1
-        r_1 = 1.0 / (4.0 * math.pi * target_fc * q1 * c2_1)
-        c2_2 = 4.7e-9
-        c1_2 = 4.0 * (q2 ** 2) * c2_2
-        r_2 = 1.0 / (4.0 * math.pi * target_fc * q2 * c2_2)
-        opt_params = [r_1, r_1, c1_1, c2_1, r_2, r_2, c1_2, c2_2]
-        print(f"  Stage 1 Pole Pair (Q1={q1:.4f}): R={r_1:.1f} Ohm, C1={c1_1*1e9:.2f} nF, C2={c2_1*1e9:.2f} nF", flush=True)
-        print(f"  Stage 2 Pole Pair (Q2={q2:.4f}): R={r_2:.1f} Ohm, C1={c1_2*1e9:.2f} nF, C2={c2_2*1e9:.2f} nF", flush=True)
-        print("  Multi-stage Butterworth pole decomposition converged analytically!", flush=True)
-    else:
-        iteration_count = [0]
+    result = synthesize_filter(
+        filter_type=filter_type, order=order, target_fc=target_fc, target_q=target_q,
+        r_series=r_series, c_series=c_series, ngspice_bin=ngspice_bin, fallback=use_fallback,
+        r_tol=r_tol, c_tol=c_tol, progress_callback=print_progress
+    )
 
-        def optimizer_objective(log_params):
-            iteration_count[0] += 1
-            params = [10.0 ** p for p in log_params]
-            fc, q, err = loss_function(params, order=order, filter_type=filter_type, ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q)
-            if iteration_count[0] % 10 == 0 or iteration_count[0] == 1:
-                print(f"  Step {iteration_count[0]:3d} | fc = {fc:8.2f} Hz | Q = {q:.3f} | Error = {err:10.2e}", flush=True)
-            return err
+    print("-" * 76, flush=True)
+    print(f"Continuous optimization completed (Iterations: {result['opt_iterations']})!", flush=True)
+    print(f"Stage 2: Snapped to standard commercial components ({r_series} / {c_series}).", flush=True)
 
-        res = minimize(optimizer_objective, x0, method="Nelder-Mead", options={"maxiter": 300, "xatol": 1e-4, "fatol": 1e-4})
-        opt_params = [10.0 ** p for p in res.x]
-        print("-" * 76, flush=True)
-        print(f"Continuous ML converged in {res.nit} iterations!", flush=True)
-    final_fc_opt, final_q_opt, _ = loss_function(opt_params, order=order, filter_type=filter_type, ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q, output_data_file=SIM_DATA_PATH)
-    freqs_opt, mags_opt = parse_simulation_data(SIM_DATA_PATH)
+    generate_bode_plot(
+        result["freqs_opt"], result["mags_opt"], target_fc, result["final_fc_opt"],
+        freqs_comm=result["freqs_comm"], mags_comm=result["mags_comm"],
+        achieved_fc_comm=result["final_fc_comm"],
+        order=order, filter_type=filter_type, output_path=PLOT_PATH
+    )
 
-    # Stage 2: Hardware Snapping
-    print("-" * 76)
-    print(f"Stage 2: Snapping to standard commercial components ({r_series} / {c_series})...")
-    if filter_type == "lpf":
-        if order == 1:
-            comm_r, comm_c, _, _ = find_commercial_pair_1st_order(target_fc, r_series=r_series, c_series=c_series)
-            comm_params = [comm_r, comm_c]
-        elif order == 2:
-            comm_r1, comm_r2, comm_c1, comm_c2, _, _ = find_commercial_components_2nd_order(target_fc, r_series=r_series, c_series=c_series)
-            comm_params = [comm_r1, comm_r2, comm_c1, comm_c2]
-        elif order == 4:
-            comm_params = list(find_commercial_cascade4(target_fc, r_series=r_series, c_series=c_series))
-    elif filter_type == "hpf":
-        comm_r1, comm_r2, comm_c1, comm_c2, _, _ = find_commercial_hpf(target_fc, r_series=r_series, c_series=c_series)
-        comm_params = [comm_r1, comm_r2, comm_c1, comm_c2]
-    elif filter_type == "bpf":
-        comm_r1, comm_r2, comm_r3, comm_c1, comm_c2, _, _ = find_commercial_bpf(target_fc, target_q=target_q, r_series=r_series, c_series=c_series)
-        comm_params = [comm_r1, comm_r2, comm_r3, comm_c1, comm_c2]
-
-    final_fc_comm, final_q_comm, _ = loss_function(comm_params, order=order, filter_type=filter_type, ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q, output_data_file=COMMERCIAL_SIM_DATA_PATH)
-    freqs_comm, mags_comm = parse_simulation_data(COMMERCIAL_SIM_DATA_PATH)
-
-    print(f"Generating Bode plot at {PLOT_PATH}...")
-    generate_bode_plot(freqs_opt, mags_opt, target_fc, final_fc_opt,
-                       freqs_comm=freqs_comm, mags_comm=mags_comm, achieved_fc_comm=final_fc_comm,
-                       order=order, filter_type=filter_type, output_path=PLOT_PATH)
-
-    # Stage 3: Export BOM & KiCad Netlist
-    comp_dict = {name: val for name, val in zip(comp_names, comm_params)}
-    bom_data = generate_bom_data(top_key, comp_dict, r_tol=r_tol, c_tol=c_tol)
-    bom_csv_path = OUTPUT_DIR / f"BOM_{top_key}.csv"
-    export_bom_csv(bom_data, bom_csv_path)
-
-    kicad_net_path = OUTPUT_DIR / f"{top_key}_kicad.net"
-    export_kicad_netlist(top_key, comp_dict, kicad_net_path)
-
-    pct_opt = abs(final_fc_opt - target_fc) / target_fc * 100.0
-    pct_comm = abs(final_fc_comm - target_fc) / target_fc * 100.0
-
-    print("\n" + "=" * 76)
-    print(f"          FINAL SYNTHESIS & HARDWARE SNAPPING REPORT ({type_title})          ")
-    print("=" * 76)
-    print(f"{'Specification':<26} | {'Initial Guess':<15} | {'ML Continuous':<15} | {'Commercial (' + r_series + ')':<15}")
-    print("-" * 76)
-    for name, init_v, opt_v, comm_v in zip(comp_names, initial_params, opt_params, comm_params):
+    print("\n" + "=" * 76, flush=True)
+    print(f"          FINAL SYNTHESIS & HARDWARE SNAPPING REPORT ({type_title})          ", flush=True)
+    print("=" * 76, flush=True)
+    print(f"{'Specification':<26} | {'Initial Guess':<15} | {'Continuous Optimal':<18} | {'Commercial (' + r_series + ')':<15}", flush=True)
+    print("-" * 76, flush=True)
+    for name, init_v, opt_v, comm_v in zip(result["comp_names"], result["initial_params"], result["opt_params"], result["comm_params"]):
         unit = "Ohm" if name.startswith("R") else "F"
-        print(f"{name:<26} | {format_eng(init_v, unit):>15} | {format_eng(opt_v, unit):>15} | {format_eng(comm_v, unit):>15}")
-    print("-" * 76)
-    print(f"{'Frequency':<26} | {init_fc:>12.2f} Hz | {final_fc_opt:>12.2f} Hz | {final_fc_comm:>12.2f} Hz")
-    print(f"{'Target Frequency':<26} | {target_fc:>12.2f} Hz | {target_fc:>12.2f} Hz | {target_fc:>12.2f} Hz")
-    print(f"{'Percentage Error':<26} | {abs(init_fc-target_fc)/target_fc*100:>11.2f} %  | {pct_opt:>11.4f} %  | {pct_comm:>11.2f} %")
+        print(f"{name:<26} | {format_eng(init_v, unit):>15} | {format_eng(opt_v, unit):>18} | {format_eng(comm_v, unit):>15}", flush=True)
+    print("-" * 76, flush=True)
+    print(f"{'Frequency':<26} | {result['init_fc']:>12.2f} Hz | {result['final_fc_opt']:>15.2f} Hz | {result['final_fc_comm']:>12.2f} Hz", flush=True)
+    print(f"{'Target Frequency':<26} | {target_fc:>12.2f} Hz | {target_fc:>15.2f} Hz | {target_fc:>12.2f} Hz", flush=True)
+    print(f"{'Percentage Error':<26} | {abs(result['init_fc']-target_fc)/target_fc*100:>11.2f} %  | {result['pct_err_opt']:>14.4f} %  | {result['pct_err_comm']:>11.2f} %", flush=True)
     if order == 2 or filter_type == "bpf":
-        print(f"{'Quality Factor (Q)':<26} | {init_q:>15.4f} | {final_q_opt:>15.4f} | {final_q_comm:>15.4f}")
-        print(f"{'Target Q':<26} | {target_q:>15.4f} | {target_q:>15.4f} | {target_q:>15.4f}")
-    print("=" * 76)
-    print(f"Bill of Materials (BOM):       {bom_csv_path}")
-    print(f"KiCad Schematic Netlist:       {kicad_net_path}")
-    print(f"SPICE Netlist (Final):         {CURRENT_SIM_PATH}")
-    print(f"Comparative Bode Plot:         {PLOT_PATH}")
-    print("=" * 76 + "\n")
+        print(f"{'Quality Factor (Q)':<26} | {result['init_q']:>15.4f} | {result['final_q_opt']:>18.4f} | {result['final_q_comm']:>15.4f}", flush=True)
+        print(f"{'Target Q':<26} | {target_q:>15.4f} | {target_q:>18.4f} | {target_q:>15.4f}", flush=True)
+    print("=" * 76, flush=True)
+    print(f"Bill of Materials (BOM):       {result['bom_csv_path']}", flush=True)
+    print(f"KiCad Schematic Netlist:       {result['kicad_net_path']}", flush=True)
+    print(f"SPICE Netlist (Final):         {CURRENT_SIM_PATH}", flush=True)
+    print(f"Comparative Bode Plot:         {PLOT_PATH}", flush=True)
+    print("=" * 76 + "\n", flush=True)
 
     if args.monte_carlo:
         run_monte_carlo_analysis(
-            comm_params,
+            result["comm_params"],
             order=order,
             filter_type=filter_type,
             target_fc=target_fc,

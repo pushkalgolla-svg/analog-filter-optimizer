@@ -48,7 +48,7 @@ st.markdown("""
 
 # Application Header
 st.title("⚡ Analog Filter Synthesizer & SPICE Verification Studio")
-st.caption("Automated Analog Filter Synthesis, Continuous ML Optimization, EIA Standard Component Snapping & Monte Carlo Manufacturing Yield Analysis")
+st.caption("Automated Analog Filter Synthesis, Continuous Numerical Optimization (Nelder-Mead Simplex), EIA Standard Component Snapping & Monte Carlo Yield Analysis")
 
 # Sidebar Controls
 st.sidebar.header("🎛️ Design Specifications")
@@ -146,64 +146,39 @@ if "results" not in st.session_state:
 
 if run_btn or st.session_state.results is None:
     with st.spinner("Synthesizing optimal component values and executing SPICE simulation..."):
-        # 1. Commercial snapping
-        if filter_type == "lpf":
-            if order == 1:
-                comm_r, comm_c, _, _ = syn.find_commercial_pair_1st_order(target_fc, r_series=r_series, c_series=c_series)
-                comm_params = [comm_r, comm_c]
-                comp_names = ["R1", "C1"]
-            elif order == 2:
-                comm_r1, comm_r2, comm_c1, comm_c2, _, _ = syn.find_commercial_components_2nd_order(target_fc, r_series=r_series, c_series=c_series)
-                comm_params = [comm_r1, comm_r2, comm_c1, comm_c2]
-                comp_names = ["R1", "R2", "C1", "C2"]
-            elif order == 4:
-                comm_params = list(syn.find_commercial_cascade4(target_fc, r_series=r_series, c_series=c_series))
-                comp_names = ["R1_1", "R2_1", "C1_1", "C2_1", "R1_2", "R2_2", "C1_2", "C2_2"]
-        elif filter_type == "hpf":
-            comm_r1, comm_r2, comm_c1, comm_c2, _, _ = syn.find_commercial_hpf(target_fc, r_series=r_series, c_series=c_series)
-            comm_params = [comm_r1, comm_r2, comm_c1, comm_c2]
-            comp_names = ["R1", "R2", "C1", "C2"]
-        elif filter_type == "bpf":
-            comm_r1, comm_r2, comm_r3, comm_c1, comm_c2, _, _ = syn.find_commercial_bpf(target_fc, target_q=target_q, r_series=r_series, c_series=c_series)
-            comm_params = [comm_r1, comm_r2, comm_r3, comm_c1, comm_c2]
-            comp_names = ["R1", "R2", "R3", "C1", "C2"]
+        try:
+            synth_res = syn.synthesize_filter(
+                target_fc=target_fc,
+                filter_type=filter_type,
+                order=order,
+                target_q=target_q,
+                r_series=r_series,
+                r_tol=r_tol,
+                c_tol=c_tol,
+                ngspice_bin=ngspice_bin,
+                fallback=(not ngspice_bin)
+            )
+        except Exception as e:
+            st.error(f"Synthesis & Optimization failed: {e}")
+            st.stop()
 
-        # Run SPICE AC sweep
-        sim_data_file = OUTPUT_DIR / "app_sim_data.txt"
-        syn.run_spice_simulation(comm_params, order=order, filter_type=filter_type, ngspice_bin=ngspice_bin, fallback=(not ngspice_bin), output_data_file=sim_data_file, target_fc=target_fc)
-        freqs, mags = syn.parse_simulation_data(sim_data_file)
+        comm_params = synth_res["comm_params"]
+        opt_params = synth_res["opt_params"]
+        comp_names = synth_res["comp_names"]
+        act_fc = synth_res["final_fc_comm"]
+        q_val = synth_res["final_q_comm"]
+        bandwidth = synth_res["bandwidth_comm"]
+        err_pct = synth_res["pct_err_comm"]
+        freqs = synth_res["freqs_comm"]
+        mags = synth_res["mags_comm"]
+        freqs_opt = synth_res["freqs_opt"]
+        mags_opt = synth_res["mags_opt"]
+        bom_rows = synth_res["bom_rows"]
+        bom_csv_path = synth_res["bom_csv_path"]
+        kicad_text = synth_res["kicad_text"]
+        spice_text = synth_res["spice_text"]
 
-        # Extract frequency and metrics
-        if filter_type in ["lpf", "hpf"]:
-            act_fc = syn.extract_cutoff_frequency(freqs, mags, filter_type=filter_type)
-            if order == 2:
-                if filter_type == "lpf":
-                    q_val = math.sqrt(comm_params[0] * comm_params[1] * comm_params[2] * comm_params[3]) / (comm_params[3] * (comm_params[0] + comm_params[1]))
-                else:
-                    q_val = math.sqrt(comm_params[0] * comm_params[1] * comm_params[2] * comm_params[3]) / (comm_params[0] * (comm_params[2] + comm_params[3]))
-            elif order == 4:
-                q_val = 0.7071
-            else:
-                q_val = 0.0
-            bandwidth = 0.0
-        else:
-            act_fc, q_val, bandwidth = syn.extract_cutoff_frequency(freqs, mags, filter_type="bpf")
-
-        err_pct = abs(act_fc - target_fc) / target_fc * 100.0
-
-        # Generate BOM and Netlist
-        comp_dict = {k: v for k, v in zip(comp_names, comm_params)}
-        bom_rows = exp.generate_bom_data(top_key, comp_dict, r_tol=r_tol, c_tol=c_tol)
-        bom_csv_path = OUTPUT_DIR / f"BOM_{top_key}.csv"
-        exp.export_bom_csv(bom_rows, bom_csv_path)
-
-        kicad_path = OUTPUT_DIR / f"{top_key}_kicad.net"
-        kicad_text = exp.export_kicad_netlist(top_key, comp_dict, kicad_path)
-
-        # SPICE Netlist
-        current_spice_text = syn.CURRENT_SIM_PATH.read_text(encoding="utf-8") if syn.CURRENT_SIM_PATH.exists() else ""
-
-        # Monte Carlo
+        # Monte Carlo Cutoff Compliance Analysis
         mc_results = None
         if enable_mc:
             mc_plot_path = OUTPUT_DIR / "app_mc_plot.png"
@@ -212,12 +187,26 @@ if run_btn or st.session_state.results is None:
                 target_q=target_q, r_tol=r_tol, c_tol=c_tol, trials=mc_trials,
                 ngspice_bin=ngspice_bin, fallback=(not ngspice_bin), output_plot=mc_plot_path
             )
+            n_trials = len(fcs_mc)
+            mu_fc = float(np.mean(fcs_mc))
+            s_fc = float(np.std(fcs_mc, ddof=1)) if n_trials > 1 else float(np.std(fcs_mc))
+            se_fc = s_fc / math.sqrt(n_trials)
             mc_results = {
                 "fcs": fcs_mc,
                 "qs": qs_mc,
                 "yield_2": y2,
                 "yield_5": y5,
-                "plot_path": mc_plot_path
+                "plot_path": mc_plot_path,
+                "trials": n_trials,
+                "r_tol": r_tol,
+                "c_tol": c_tol,
+                "mu_fc": mu_fc,
+                "s_fc": s_fc,
+                "se_fc": se_fc,
+                "ci_mean": (mu_fc - 1.96 * se_fc, mu_fc + 1.96 * se_fc),
+                "dist_band": (mu_fc - 1.96 * s_fc, mu_fc + 1.96 * s_fc),
+                "p2_5": float(np.percentile(fcs_mc, 2.5)),
+                "p97_5": float(np.percentile(fcs_mc, 97.5))
             }
 
         st.session_state.results = {
@@ -231,24 +220,43 @@ if run_btn or st.session_state.results is None:
             "bandwidth": bandwidth,
             "err_pct": err_pct,
             "comm_params": comm_params,
+            "opt_params": opt_params,
+            "final_fc_opt": synth_res["final_fc_opt"],
+            "pct_err_opt": synth_res["pct_err_opt"],
+            "opt_iterations": synth_res["opt_iterations"],
             "comp_names": comp_names,
             "freqs": freqs,
             "mags": mags,
+            "freqs_opt": freqs_opt,
+            "mags_opt": mags_opt,
             "bom_rows": bom_rows,
             "bom_csv_path": bom_csv_path,
             "kicad_text": kicad_text,
-            "spice_text": current_spice_text,
-            "mc_results": mc_results
+            "spice_text": spice_text,
+            "mc_results": mc_results,
+            "r_series": r_series,
+            "c_series": c_series,
+            "r_tol": r_tol,
+            "c_tol": c_tol
         }
 
 res = st.session_state.results
 
-# Top KPI Summary Metrics
+# Top KPI Summary Metrics: Target vs Achieved
 col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
-    st.metric("Synthesized Frequency", f"{res['act_fc']:.2f} Hz", f"{res['act_fc'] - res['target_fc']:+.2f} Hz")
+    st.metric(
+        "Synthesized Cutoff",
+        f"{res['act_fc']:.2f} Hz",
+        f"Target: {res['target_fc']:.0f} Hz ({res['act_fc'] - res['target_fc']:+.2f} Hz)"
+    )
 with col2:
-    st.metric("Target Error", f"{res['err_pct']:.2f} %", delta="Pass (< 1.5%)", delta_color="normal" if res['err_pct'] < 1.5 else "inverse")
+    st.metric(
+        "Cutoff Error",
+        f"{res['err_pct']:.2f} %",
+        delta="Target: < 1.5%",
+        delta_color="normal" if res['err_pct'] < 1.5 else "inverse"
+    )
 with col3:
     if res['filter_type'] == "bpf":
         st.metric("Resonant Q Factor", f"{res['q_val']:.3f}", f"Target: {res['target_q']:.2f}")
@@ -268,7 +276,7 @@ with col4:
     st.metric("Stopband Slope", roll_str, "SPICE Verified")
 with col5:
     if res["mc_results"]:
-        st.metric("±5% Spec Yield", f"{res['mc_results']['yield_5']:.1f} %", f"±2%: {res['mc_results']['yield_2']:.1f}%")
+        st.metric("±5% Spec Compliance", f"{res['mc_results']['yield_5']:.1f} %", f"±2%: {res['mc_results']['yield_2']:.1f}%")
     else:
         st.metric("Tolerance Check", "Standard EIA", f"Res: {r_series}")
 
@@ -291,7 +299,21 @@ with tab_bode:
     act_fc = res["act_fc"]
     t_fc = res["target_fc"]
 
-    ax.semilogx(freqs, mags, color="#1f77b4", linewidth=2.5, label=f"SPICE AC Sweep (Simulated fc={act_fc:.1f} Hz)")
+    # Continuous numerical optimization response (Stage 1)
+    if "freqs_opt" in res and res["freqs_opt"] and "mags_opt" in res and res["mags_opt"]:
+        ax.semilogx(
+            res["freqs_opt"], res["mags_opt"],
+            color="#ff7f0e", linestyle="--", linewidth=1.8, alpha=0.85,
+            label=f"Continuous Optimal (fc={res.get('final_fc_opt', t_fc):.1f} Hz, err={res.get('pct_err_opt', 0.0):.2f}%)"
+        )
+
+    # Commercial EIA snapped response (Stage 2)
+    ax.semilogx(
+        freqs, mags,
+        color="#1f77b4", linewidth=2.5,
+        label=f"E-Series Snapped (fc={act_fc:.1f} Hz, err={res['err_pct']:.2f}%)"
+    )
+
     if res["filter_type"] in ["lpf", "hpf"]:
         ax.axhline(-3.0103, color="#d62728", linestyle=":", label="-3.01 dB Cutoff Threshold")
         ax.axvline(t_fc, color="#7f7f7f", linestyle="-.", label=f"Target ({t_fc:.0f} Hz)")
@@ -313,7 +335,26 @@ with tab_bode:
     st.pyplot(fig)
     plt.close()
 
-# Tab 2: Monte Carlo Yield
+    # Optimization & Synthesis Pipeline Comparison Table
+    st.markdown("#### ⚙️ Continuous Numerical Optimization vs. Commercial E-Series Snapping")
+    comp_comparison = []
+    opt_p = res.get("opt_params", res["comm_params"])
+    comm_p = res["comm_params"]
+    for name, c_opt, c_comm in zip(res["comp_names"], opt_p, comm_p):
+        dev = abs(c_comm - c_opt) / c_opt * 100.0 if c_opt > 0 else 0.0
+        val_opt_str = f"{c_opt:.2f} Ω" if "R" in name else f"{c_opt*1e9:.2f} nF"
+        val_comm_str = f"{c_comm:.2f} Ω" if "R" in name else f"{c_comm*1e9:.2f} nF"
+        series_used = res.get("r_series", "E24") if "R" in name else "E12"
+        comp_comparison.append({
+            "Component": name,
+            "Continuous Optimal (Nelder-Mead)": val_opt_str,
+            "Commercial Snapped": val_comm_str,
+            "Snapping Deviation": f"{dev:.2f} %",
+            "E-Series Standard": series_used
+        })
+    st.dataframe(pd.DataFrame(comp_comparison), use_container_width=True, hide_index=True)
+
+# Tab 2: Monte Carlo Cutoff Compliance
 with tab_mc:
     if res["mc_results"]:
         mc = res["mc_results"]
@@ -321,20 +362,35 @@ with tab_mc:
         with mc_col1:
             st.image(str(mc["plot_path"]), caption="Statistical Monte Carlo SPICE Verification (Component Gaussian Distribution)", use_container_width=True)
         with mc_col2:
-            st.markdown("#### Yield Scorecard")
+            st.markdown("#### Cutoff Compliance Scorecard")
             st.markdown(f"""
-            - **Trials**: `{len(mc['fcs'])} SPICE runs`
-            - **Mean fc**: `{np.mean(mc['fcs']):.2f} Hz`
-            - **Std Dev ($\sigma$)**: `{np.std(mc['fcs']):.2f} Hz`
-            - **95% Confidence Interval**:
-              `[{np.mean(mc['fcs']) - 1.96*np.std(mc['fcs']):.1f} Hz, {np.mean(mc['fcs']) + 1.96*np.std(mc['fcs']):.1f} Hz]`
-            - **±2% Band Yield**: `{mc['yield_2']:.1f} %`
-            - **±5% Band Yield**: `{mc['yield_5']:.1f} %`
+            - **Statistical Trials**: `{mc['trials']} SPICE runs`
+            - **Assumed Tolerances**:
+              - Resistors: `±{mc['r_tol']}%`
+              - Capacitors: `±{mc['c_tol']}%`
+            - **Mean Cutoff ($f_c$)**: `{mc['mu_fc']:.2f} Hz`
+            - **Sample Std Dev ($s$)**: `{mc['s_fc']:.2f} Hz`
+            - **Mean 95% Confidence Interval**:
+              `[{mc['ci_mean'][0]:.2f} Hz, {mc['ci_mean'][1]:.2f} Hz]`
+              *($\\mu \\pm 1.96 \\cdot s / \\sqrt{{N}}$)*
+            - **Approx. 95% Distribution Band**:
+              `[{mc['dist_band'][0]:.2f} Hz, {mc['dist_band'][1]:.2f} Hz]`
+              *($\\mu \\pm 1.96 \\cdot s$)*
+            - **Empirical 95% Interval**:
+              `[{mc['p2_5']:.2f} Hz, {mc['p97_5']:.2f} Hz]`
+              *(2.5th – 97.5th percentile)*
+            - **Cutoff Compliance (±2% Band)**: `{mc['yield_2']:.1f} %`
+            - **Cutoff Compliance (±5% Band)**: `{mc['yield_5']:.1f} %`
             """)
             if mc["yield_5"] >= 95.0:
-                st.success("✓ Production Grade Yield (> 95%)")
+                st.success("✓ Cutoff Spec Compliance > 95%")
             else:
-                st.warning("⚠ Tighten component tolerances to improve yield")
+                st.warning("⚠ Tighten component tolerances to improve compliance")
+            st.caption(
+                "ℹ️ **Note on Yield**: This metric measures cutoff-frequency tolerance compliance only. "
+                "Overall manufacturing yield would additionally depend on PCB trace parasitics, op-amp saturation/slew limits, "
+                "temperature coefficients, component derating, and PCB assembly defect rates."
+            )
     else:
         st.info("Monte Carlo analysis was disabled in sidebar settings.")
 

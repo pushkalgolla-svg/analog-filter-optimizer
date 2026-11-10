@@ -1,4 +1,4 @@
-(export (version D) (design (source "AnalogFilterSynthesis") (tool "ML-Filter-Synthesizer"))
+(export (version D) (design (source "AnalogFilterSynthesis") (tool "Analog-Filter-Synthesizer"))
   (components
     (comp (ref R1) (value "97.6k Ohm") (footprint Resistor_SMD:R_0805_2012Metric))
     (comp (ref R2) (value "52.3k Ohm") (footprint Resistor_SMD:R_0805_2012Metric))
