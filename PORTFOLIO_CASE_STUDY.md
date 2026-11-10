@@ -102,6 +102,10 @@ flowchart TD
     - Cutoff Compliance (±5% spec band): **$100.0\%$**
     - *Note: Frequency yield evaluates cutoff tolerance compliance only; overall manufacturing yield additionally depends on board parasitics, op-amp saturation, and assembly defects.*
 
+### 4. Method Differentiation: Numerical Optimization vs. Analytical Closed-Form Sizing
+- **Nelder-Mead Simplex Numerical Path**: Applied to 1st-order RC, 2nd-order Sallen-Key LPF, 2nd-order Sallen-Key HPF, and 2nd-order MFB BPF. The solver dynamically navigates component interaction landscapes in $\log_{10}$ space with full failure validation (checking convergence flag, rejecting non-finite/sentinel objectives, and confirming strictly positive values).
+- **Analytical Closed-Form Sizing Path**: Applied to 4th-order Cascaded Sallen-Key LPF. Because a 4th-order Butterworth response requires exact biquad stage pole damping ($Q_1=0.5412$ and $Q_2=1.3065$), multi-variable iterative search can encounter local minima that distort pole separation. We use exact algebraic polynomial factorization to size stage parameters in closed form, followed by coupled commercial snapping and SPICE verification.
+
 ---
 
 ## 5. Technical Interview Questions & Model Answers

@@ -15,6 +15,7 @@ import math
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # Add project root and scripts directory to sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -33,6 +34,7 @@ from synthesize import (
     E_SERIES,
     TARGET_CUTOFF_HZ,
     BUTTERWORTH_Q,
+    SENTINEL_FAILURE_OBJ,
 )
 from export_manufacturing import (
     find_verified_component,
@@ -287,6 +289,207 @@ class TestAnalyticalSynthesisPipeline(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             synthesize_filter(target_fc=1000.0, filter_type="lpf", order=3, fallback=True)
+
+
+class TestOptimizerFailureHandling(unittest.TestCase):
+    """
+    Regression tests for optimizer convergence checks, sentinel rejection,
+    and simulation verification failure handling in synthesize_filter().
+    """
+
+    def test_successful_optimization_reporting(self):
+        """Standard Nelder-Mead optimization succeeds and accurately reports method and metrics."""
+        res = synthesize_filter(
+            target_fc=1000.0,
+            filter_type="lpf",
+            order=2,
+            r_series="E96",
+            fallback=True
+        )
+        self.assertTrue(res["success"])
+        self.assertEqual(res["optimization_method"], "nelder_mead")
+        self.assertGreater(res["opt_iterations"], 0)
+        self.assertTrue(all(p > 0 and math.isfinite(p) for p in res["opt_params"]))
+        self.assertTrue(all(p > 0 and math.isfinite(p) for p in res["comm_params"]))
+        self.assertTrue(math.isfinite(res["final_fc_opt"]) and res["final_fc_opt"] > 0)
+        self.assertTrue(math.isfinite(res["final_fc_comm"]) and res["final_fc_comm"] > 0)
+        self.assertLess(res["pct_err_comm"], 1.5)
+
+    def test_fourth_order_analytical_closed_form_sizing_path(self):
+        """4th-order cascaded LPF uses analytical closed-form sizing, distinct from Nelder-Mead."""
+        res = synthesize_filter(
+            target_fc=1000.0,
+            filter_type="lpf",
+            order=4,
+            r_series="E96",
+            fallback=True
+        )
+        self.assertTrue(res["success"])
+        self.assertEqual(res["optimization_method"], "analytical_closed_form")
+        self.assertEqual(res["opt_iterations"], 0)
+        self.assertEqual(len(res["opt_params"]), 8)
+        self.assertTrue(all(p > 0 and math.isfinite(p) for p in res["opt_params"]))
+        self.assertIn("Analytical closed-form", res["opt_message"])
+        self.assertLess(res["pct_err_comm"], 2.5)
+
+    @patch("synthesize.minimize")
+    def test_optimizer_returning_success_false(self, mock_minimize):
+        """When optimizer returns success=False, synthesize_filter reports failure with clear error."""
+        from scipy.optimize import OptimizeResult
+        mock_minimize.return_value = OptimizeResult(
+            success=False,
+            message="Maximum iterations reached without convergence",
+            fun=150.0,
+            x=[4.0, 4.0, -8.0, -8.0],
+            nit=300
+        )
+        res = synthesize_filter(
+            target_fc=1000.0,
+            filter_type="lpf",
+            order=2,
+            fallback=True
+        )
+        self.assertFalse(res["success"])
+        self.assertEqual(res["failure_stage"], "continuous_optimization")
+        self.assertIn("failed to converge", res["error"])
+        self.assertIn("Maximum iterations reached", res["error"])
+
+    @patch("synthesize.minimize")
+    def test_optimizer_returning_non_finite_objective_nan(self, mock_minimize):
+        """When optimizer returns NaN objective, synthesize_filter rejects it."""
+        from scipy.optimize import OptimizeResult
+        mock_minimize.return_value = OptimizeResult(
+            success=True,
+            message="Optimization terminated successfully",
+            fun=float("nan"),
+            x=[4.0, 4.0, -8.0, -8.0],
+            nit=25
+        )
+        res = synthesize_filter(
+            target_fc=1000.0,
+            filter_type="lpf",
+            order=2,
+            fallback=True
+        )
+        self.assertFalse(res["success"])
+        self.assertEqual(res["failure_stage"], "continuous_optimization")
+        self.assertIn("non-finite objective value", res["error"])
+
+    @patch("synthesize.minimize")
+    def test_optimizer_returning_non_finite_objective_inf(self, mock_minimize):
+        """When optimizer returns Inf objective, synthesize_filter rejects it."""
+        from scipy.optimize import OptimizeResult
+        mock_minimize.return_value = OptimizeResult(
+            success=True,
+            message="Optimization terminated successfully",
+            fun=float("inf"),
+            x=[4.0, 4.0, -8.0, -8.0],
+            nit=25
+        )
+        res = synthesize_filter(
+            target_fc=1000.0,
+            filter_type="lpf",
+            order=2,
+            fallback=True
+        )
+        self.assertFalse(res["success"])
+        self.assertEqual(res["failure_stage"], "continuous_optimization")
+        self.assertIn("non-finite objective value", res["error"])
+
+    @patch("synthesize.minimize")
+    def test_all_evaluations_returning_failure_sentinel(self, mock_minimize):
+        """When objective evaluates to failure sentinel (1e12), synthesize_filter rejects it."""
+        from scipy.optimize import OptimizeResult
+        mock_minimize.return_value = OptimizeResult(
+            success=True,
+            message="Optimization terminated successfully",
+            fun=1.0e12,
+            x=[4.0, 4.0, -8.0, -8.0],
+            nit=25
+        )
+        res = synthesize_filter(
+            target_fc=1000.0,
+            filter_type="lpf",
+            order=2,
+            fallback=True
+        )
+        self.assertFalse(res["success"])
+        self.assertEqual(res["failure_stage"], "continuous_optimization")
+        self.assertIn("failure sentinel", res["error"])
+
+    @patch("synthesize.minimize")
+    def test_optimizer_returning_non_positive_components(self, mock_minimize):
+        """When optimizer produces non-positive or NaN component values, synthesize_filter rejects it."""
+        from scipy.optimize import OptimizeResult
+        mock_minimize.return_value = OptimizeResult(
+            success=True,
+            message="Optimization terminated successfully",
+            fun=0.01,
+            x=[float("nan"), 4.0, -8.0, -8.0],
+            nit=25
+        )
+        res = synthesize_filter(
+            target_fc=1000.0,
+            filter_type="lpf",
+            order=2,
+            fallback=True
+        )
+        self.assertFalse(res["success"])
+        self.assertEqual(res["failure_stage"], "continuous_optimization")
+        self.assertIn("non-physical, non-finite, or non-positive", res["error"])
+
+    @patch("synthesize.loss_function")
+    def test_invalid_final_simulation_frequency(self, mock_loss):
+        """When final simulated cutoff frequency is non-positive or sentinel, synthesize_filter reports verification failure."""
+        mock_loss.side_effect = [
+            (1000.0, 0.7071, 0.0),    # init_fc
+            (0.0, 0.0, 1.0e12),       # final_fc_opt verification failure
+        ]
+        res = synthesize_filter(
+            target_fc=1000.0,
+            filter_type="lpf",
+            order=4,  # analytical closed-form path directly reaches verification
+            fallback=True
+        )
+        self.assertFalse(res["success"])
+        self.assertEqual(res["failure_stage"], "continuous_verification")
+        self.assertIn("invalid cutoff frequency", res["error"])
+
+    @patch("synthesize.parse_simulation_data")
+    def test_empty_or_unusable_simulation_response_data(self, mock_parse):
+        """When simulation data parsing returns empty or insufficient points, synthesize_filter reports failure."""
+        import numpy as np
+        mock_parse.return_value = (np.array([]), np.array([]))
+        res = synthesize_filter(
+            target_fc=1000.0,
+            filter_type="lpf",
+            order=4,
+            fallback=True
+        )
+        self.assertFalse(res["success"])
+        self.assertEqual(res["failure_stage"], "continuous_verification")
+        self.assertIn("insufficient", res["error"])
+
+    def test_raise_on_error_mode(self):
+        """When raise_on_error=True, failure raises RuntimeError instead of returning dictionary."""
+        with patch("synthesize.minimize") as mock_minimize:
+            from scipy.optimize import OptimizeResult
+            mock_minimize.return_value = OptimizeResult(
+                success=False,
+                message="Convergence failure",
+                fun=999.0,
+                x=[4.0, 4.0, -8.0, -8.0],
+                nit=100
+            )
+            with self.assertRaises(RuntimeError) as ctx:
+                synthesize_filter(
+                    target_fc=1000.0,
+                    filter_type="lpf",
+                    order=2,
+                    fallback=True,
+                    raise_on_error=True
+                )
+            self.assertIn("failed to converge", str(ctx.exception))
 
 
 if __name__ == "__main__":

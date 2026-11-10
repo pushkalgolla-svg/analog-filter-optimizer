@@ -16,14 +16,15 @@ An end-to-end analog active and passive filter synthesis engine powered by conti
 
 ## Key Features
 
-- **Multi-Topology Synthesis**:
-  - **1st-Order Passive RC Low-Pass Filter** ($-20\text{ dB/decade}$ roll-off)
-  - **2nd-Order Active Sallen-Key Low-Pass Filter** ($-40\text{ dB/decade}$ roll-off, Butterworth $Q = 0.7071$)
-  - **2nd-Order Active Sallen-Key High-Pass Filter** ($+40\text{ dB/decade}$ roll-off, Butterworth $Q = 0.7071$)
-  - **2nd-Order Multiple-Feedback (MFB) Band-Pass Filter** (Center $f_0$, adjustable $Q$ & Bandwidth)
-  - **4th-Order Cascaded Sallen-Key Low-Pass Filter** ($-80\text{ dB/decade}$ brickwall roll-off, $Q_1 = 0.5412$, $Q_2 = 1.3065$)
-- **Continuous Parameter Optimization**:
+- **Multi-Topology Synthesis & Tailored Sizing Methods**:
+  - **1st-Order Passive RC Low-Pass Filter** ($-20\text{ dB/decade}$ roll-off) — *Nelder-Mead simplex optimization in logarithmic space*
+  - **2nd-Order Active Sallen-Key Low-Pass Filter** ($-40\text{ dB/decade}$ roll-off, Butterworth $Q = 0.7071$) — *Nelder-Mead simplex numerical optimization with joint cutoff and damping penalty*
+  - **2nd-Order Active Sallen-Key High-Pass Filter** ($+40\text{ dB/decade}$ roll-off, Butterworth $Q = 0.7071$) — *Nelder-Mead simplex numerical optimization with high-pass damping penalty*
+  - **2nd-Order Multiple-Feedback (MFB) Band-Pass Filter** (Center $f_0$, adjustable $Q$ & Bandwidth) — *Nelder-Mead simplex numerical optimization targeting resonance and selectivity*
+  - **4th-Order Cascaded Sallen-Key Low-Pass Filter** ($-80\text{ dB/decade}$ brickwall roll-off) — ***Analytical Closed-Form Sizing Path*** *decomposing the 4th-order Butterworth polynomial into exact cascaded biquad pole-placements ($Q_1 = 0.5412$, $Q_2 = 1.3065$)*
+- **Continuous Parameter Optimization & Failure Validation**:
   - Nelder-Mead simplex algorithm operating in logarithmic component space ($\log_{10} R, \log_{10} C$) to prevent scaling issues and guarantee positive component values.
+  - Full optimizer validation: checks convergence status (`res.success`, `res.message`), rejects non-finite objective values, rejects failure sentinel objectives ($10^{12}$), and validates positive physical component values before SPICE verification.
 - **Coupled Commercial Snapping**:
   - Discrete coupled grid search pairing standard E12/E24 capacitors with closest standard E96 resistors to maintain $< 0.15\%$ cutoff error.
 - **Statistical Monte Carlo Sensitivity & Compliance Analysis**:

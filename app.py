@@ -158,6 +158,9 @@ if run_btn or st.session_state.results is None:
                 ngspice_bin=ngspice_bin,
                 fallback=(not ngspice_bin)
             )
+            if not synth_res.get("success", False):
+                st.error(f"❌ Synthesis failed at stage '{synth_res.get('failure_stage', 'optimization')}': {synth_res.get('error', 'Optimization failed')}")
+                st.stop()
         except Exception as e:
             st.error(f"Synthesis & Optimization failed: {e}")
             st.stop()
@@ -224,6 +227,7 @@ if run_btn or st.session_state.results is None:
             "final_fc_opt": synth_res["final_fc_opt"],
             "pct_err_opt": synth_res["pct_err_opt"],
             "opt_iterations": synth_res["opt_iterations"],
+            "optimization_method": synth_res.get("optimization_method", "nelder_mead"),
             "comp_names": comp_names,
             "freqs": freqs,
             "mags": mags,
@@ -336,10 +340,12 @@ with tab_bode:
     plt.close()
 
     # Optimization & Synthesis Pipeline Comparison Table
-    st.markdown("#### ⚙️ Continuous Numerical Optimization vs. Commercial E-Series Snapping")
+    opt_method_desc = "Analytical Closed-Form Sizing" if res.get("optimization_method") == "analytical_closed_form" else "Nelder-Mead Numerical Optimization"
+    st.markdown(f"#### ⚙️ Continuous Sizing ({opt_method_desc}) vs. Commercial E-Series Snapping")
     comp_comparison = []
     opt_p = res.get("opt_params", res["comm_params"])
     comm_p = res["comm_params"]
+    col_opt_name = f"Continuous Optimal ({'Analytical' if res.get('optimization_method') == 'analytical_closed_form' else 'Nelder-Mead'})"
     for name, c_opt, c_comm in zip(res["comp_names"], opt_p, comm_p):
         dev = abs(c_comm - c_opt) / c_opt * 100.0 if c_opt > 0 else 0.0
         val_opt_str = f"{c_opt:.2f} Ω" if "R" in name else f"{c_opt*1e9:.2f} nF"
@@ -347,7 +353,7 @@ with tab_bode:
         series_used = res.get("r_series", "E24") if "R" in name else "E12"
         comp_comparison.append({
             "Component": name,
-            "Continuous Optimal (Nelder-Mead)": val_opt_str,
+            col_opt_name: val_opt_str,
             "Commercial Snapped": val_comm_str,
             "Snapping Deviation": f"{dev:.2f} %",
             "E-Series Standard": series_used

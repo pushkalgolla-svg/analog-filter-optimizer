@@ -51,6 +51,7 @@ MC_PLOT_PATH = OUTPUT_DIR / "monte_carlo_yield.png"
 # Target Specifications
 TARGET_CUTOFF_HZ = 1000.0   # 1 kHz (-3dB cutoff point)
 BUTTERWORTH_Q = 1.0 / math.sqrt(2.0)  # Q = 0.7071
+SENTINEL_FAILURE_OBJ = 1.0e12  # Sentinel objective value returned on simulation / convergence failure
 
 # EIA Standard E-Series Multipliers
 E_SERIES = {
@@ -280,6 +281,9 @@ def parse_simulation_data(data_path=SIM_DATA_PATH):
 
 def extract_cutoff_frequency(freqs, mags, filter_type="lpf", db_drop=3.0103):
     """Calculates continuous -3dB cutoff frequency using linear interpolation."""
+    if len(freqs) == 0 or len(mags) == 0:
+        return (0.0, 0.0, 0.0) if filter_type == "bpf" else 0.0
+
     if filter_type == "lpf":
         passband_mag = mags[0]
         cutoff_mag = passband_mag - db_drop
@@ -318,15 +322,23 @@ def loss_function(params, order=1, filter_type="lpf", ngspice_bin=None, fallback
     try:
         run_spice_simulation(params, order=order, filter_type=filter_type, ngspice_bin=ngspice_bin, fallback=fallback, output_data_file=output_data_file, target_fc=target_fc)
         freqs, mags = parse_simulation_data(output_data_file)
+        if len(freqs) < 2 or len(mags) < 2:
+            return 0.0, 0.0, SENTINEL_FAILURE_OBJ
 
         if filter_type == "lpf":
             actual_fc = extract_cutoff_frequency(freqs, mags, filter_type="lpf")
+            if not np.isfinite(actual_fc) or actual_fc <= 0:
+                return 0.0, 0.0, SENTINEL_FAILURE_OBJ
             if order == 1:
                 error = (actual_fc - target_fc) ** 2
                 return actual_fc, 0.0, error
             elif order == 2:
                 r1, r2, c1, c2 = params
-                q_actual = math.sqrt(r1 * r2 * c1 * c2) / (c2 * (r1 + r2))
+                denom = c2 * (r1 + r2)
+                prod = r1 * r2 * c1 * c2
+                if denom <= 0 or prod <= 0:
+                    return 0.0, 0.0, SENTINEL_FAILURE_OBJ
+                q_actual = math.sqrt(prod) / denom
                 error = (actual_fc - target_fc) ** 2 + 1000.0 * (q_actual - BUTTERWORTH_Q) ** 2
                 return actual_fc, q_actual, error
             elif order == 4:
@@ -334,17 +346,25 @@ def loss_function(params, order=1, filter_type="lpf", ngspice_bin=None, fallback
                 return actual_fc, 0.7071, error
         elif filter_type == "hpf":
             actual_fc = extract_cutoff_frequency(freqs, mags, filter_type="hpf")
+            if not np.isfinite(actual_fc) or actual_fc <= 0:
+                return 0.0, 0.0, SENTINEL_FAILURE_OBJ
             r1, r2, c1, c2 = params
-            q_actual = math.sqrt(r1 * r2 * c1 * c2) / (r1 * (c1 + c2))
+            denom = r1 * (c1 + c2)
+            prod = r1 * r2 * c1 * c2
+            if denom <= 0 or prod <= 0:
+                return 0.0, 0.0, SENTINEL_FAILURE_OBJ
+            q_actual = math.sqrt(prod) / denom
             error = (actual_fc - target_fc) ** 2 + 1000.0 * (q_actual - BUTTERWORTH_Q) ** 2
             return actual_fc, q_actual, error
         elif filter_type == "bpf":
             f_peak, q_actual, _ = extract_cutoff_frequency(freqs, mags, filter_type="bpf")
+            if not np.isfinite(f_peak) or f_peak <= 0:
+                return 0.0, 0.0, SENTINEL_FAILURE_OBJ
             error = (f_peak - target_fc) ** 2 + 500.0 * (q_actual - target_q) ** 2
             return f_peak, q_actual, error
     except Exception:
-        return 0.0, 0.0, 1.0e12
-    return 0.0, 0.0, 1.0e12
+        return 0.0, 0.0, SENTINEL_FAILURE_OBJ
+    return 0.0, 0.0, SENTINEL_FAILURE_OBJ
 
 
 # Commercial Snapping Algorithms
@@ -468,14 +488,18 @@ def find_commercial_cascade4(target_fc, r_series="E96", c_series="E12"):
 
 def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, target_q=None,
                       r_series="E96", c_series="E12", ngspice_bin=None, fallback=False,
-                      r_tol=None, c_tol=5.0, progress_callback=None):
+                      r_tol=None, c_tol=5.0, progress_callback=None, raise_on_error=False):
     """
     Unified synthesis and optimization pipeline shared by both CLI and Streamlit GUI.
-    1. Validates inputs safely.
-    2. Runs continuous numerical optimization (Nelder-Mead simplex) in log10 space.
-    3. Performs coupled EIA standard commercial component snapping.
-    4. Simulates and verifies both continuous and snapped designs in SPICE.
-    5. Exports verified Bill of Materials (BOM) and KiCad schematic netlists.
+    1. Validates input specifications safely.
+    2. Runs continuous component optimization:
+       - 4th-order LPF: Exact analytical closed-form Butterworth pole-placement sizing.
+       - 1st-order, 2nd-order LPF, HPF, BPF: SciPy Nelder-Mead simplex numerical optimization in log10 space.
+    3. Validates optimizer convergence, objective value, and component physical sanity.
+    4. Simulates and verifies the continuous optimal design against target specs.
+    5. Performs coupled EIA standard commercial component snapping (E12, E24, E96).
+    6. Simulates and verifies the snapped commercial design against target specs.
+    7. Exports verified Bill of Materials (BOM) and KiCad schematic netlists.
     """
     if not isinstance(target_fc, (int, float, np.number)) or math.isnan(target_fc) or math.isinf(target_fc) or target_fc <= 0:
         raise ValueError(f"Target frequency must be a finite positive number, got: {target_fc}")
@@ -534,9 +558,11 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
         ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q
     )
 
-    # Stage 1: Continuous Numerical Optimization (Nelder-Mead)
+    # Stage 1: Continuous Sizing / Numerical Optimization
     iteration_count = [0]
     if filter_type == "lpf" and order == 4:
+        optimization_method = "analytical_closed_form"
+        # 4th-order cascaded Butterworth uses exact closed-form stage pole-placement
         q1 = 0.5412
         q2 = 1.3065
         c2_1 = 10e-9
@@ -547,14 +573,24 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
         r_2 = 1.0 / (4.0 * math.pi * target_fc * q2 * c2_2)
         opt_params = [r_1, r_1, c1_1, c2_1, r_2, r_2, c1_2, c2_2]
         opt_iterations = 0
+        opt_message = "Analytical closed-form Butterworth cascaded pole-placement sizing succeeded."
+        opt_cost = 0.0
     else:
+        optimization_method = "nelder_mead"
+
         def optimizer_objective(log_params):
             iteration_count[0] += 1
+            if any(not np.isfinite(p) for p in log_params):
+                return SENTINEL_FAILURE_OBJ
             params = [10.0 ** p for p in log_params]
+            if any(not np.isfinite(p) or p <= 0 for p in params):
+                return SENTINEL_FAILURE_OBJ
             fc, q, err = loss_function(
                 params, order=order, filter_type=filter_type,
                 ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q
             )
+            if not np.isfinite(err):
+                err = SENTINEL_FAILURE_OBJ
             if progress_callback:
                 progress_callback(iteration_count[0], fc, q, err)
             return err
@@ -563,15 +599,119 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
             optimizer_objective, x0, method="Nelder-Mead",
             options={"maxiter": 300, "xatol": 1e-4, "fatol": 1e-4}
         )
-        opt_params = [10.0 ** p for p in res.x]
-        opt_iterations = res.nit
 
-    final_fc_opt, final_q_opt, _ = loss_function(
+        # 1. Validate optimizer convergence
+        if not getattr(res, "success", False):
+            err_msg = f"Nelder-Mead continuous optimization failed to converge: {getattr(res, 'message', 'Optimization unsuccessful')}."
+            if raise_on_error:
+                raise RuntimeError(err_msg)
+            return {
+                "success": False,
+                "error": err_msg,
+                "failure_stage": "continuous_optimization",
+                "optimizer_message": getattr(res, "message", ""),
+                "filter_type": filter_type,
+                "order": order,
+                "target_fc": float(target_fc),
+                "target_q": float(target_q),
+                "optimization_method": optimization_method,
+            }
+
+        # 2. Reject non-finite objective
+        if not np.isfinite(res.fun):
+            err_msg = f"Nelder-Mead optimizer produced a non-finite objective value: {res.fun}."
+            if raise_on_error:
+                raise RuntimeError(err_msg)
+            return {
+                "success": False,
+                "error": err_msg,
+                "failure_stage": "continuous_optimization",
+                "optimizer_message": getattr(res, "message", ""),
+                "filter_type": filter_type,
+                "order": order,
+                "target_fc": float(target_fc),
+                "target_q": float(target_q),
+                "optimization_method": optimization_method,
+            }
+
+        # 3. Reject failure sentinel objective (>= 1e11)
+        if res.fun >= 1e11:
+            err_msg = (f"Nelder-Mead optimizer failed to find a feasible solution: "
+                       f"objective reached failure sentinel ({res.fun:.2e}). "
+                       f"Please verify circuit specifications and simulator configuration.")
+            if raise_on_error:
+                raise RuntimeError(err_msg)
+            return {
+                "success": False,
+                "error": err_msg,
+                "failure_stage": "continuous_optimization",
+                "optimizer_message": getattr(res, "message", ""),
+                "filter_type": filter_type,
+                "order": order,
+                "target_fc": float(target_fc),
+                "target_q": float(target_q),
+                "optimization_method": optimization_method,
+            }
+
+        # 4. Validate component values are finite and strictly positive
+        opt_params = [float(10.0 ** p) for p in res.x]
+        if any(not np.isfinite(p) or p <= 0.0 for p in opt_params):
+            err_msg = "Nelder-Mead optimizer produced non-physical, non-finite, or non-positive component values."
+            if raise_on_error:
+                raise RuntimeError(err_msg)
+            return {
+                "success": False,
+                "error": err_msg,
+                "failure_stage": "continuous_optimization",
+                "optimizer_message": getattr(res, "message", ""),
+                "filter_type": filter_type,
+                "order": order,
+                "target_fc": float(target_fc),
+                "target_q": float(target_q),
+                "optimization_method": optimization_method,
+            }
+
+        opt_iterations = res.nit
+        opt_message = res.message
+        opt_cost = float(res.fun)
+
+    # Stage 1 Verification: Simulate continuous optimal parameters
+    final_fc_opt, final_q_opt, err_opt = loss_function(
         opt_params, order=order, filter_type=filter_type,
         ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q,
         output_data_file=SIM_DATA_PATH
     )
     freqs_opt, mags_opt = parse_simulation_data(SIM_DATA_PATH)
+
+    if len(freqs_opt) < 2 or len(mags_opt) < 2 or any(not np.isfinite(f) for f in freqs_opt) or any(not np.isfinite(m) for m in mags_opt):
+        err_msg = "Continuous optimal simulation verification generated insufficient, non-finite, or empty frequency response data."
+        if raise_on_error:
+            raise RuntimeError(err_msg)
+        return {
+            "success": False,
+            "error": err_msg,
+            "failure_stage": "continuous_verification",
+            "filter_type": filter_type,
+            "order": order,
+            "target_fc": float(target_fc),
+            "target_q": float(target_q),
+            "optimization_method": optimization_method,
+        }
+
+    if not np.isfinite(final_fc_opt) or final_fc_opt <= 0.0 or err_opt >= 1e11:
+        err_msg = f"Continuous optimal simulation verification produced invalid cutoff frequency: {final_fc_opt} Hz."
+        if raise_on_error:
+            raise RuntimeError(err_msg)
+        return {
+            "success": False,
+            "error": err_msg,
+            "failure_stage": "continuous_verification",
+            "filter_type": filter_type,
+            "order": order,
+            "target_fc": float(target_fc),
+            "target_q": float(target_q),
+            "optimization_method": optimization_method,
+        }
 
     # Stage 2: Hardware E-Series Snapping
     if filter_type == "lpf":
@@ -590,12 +730,43 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
         comm_r1, comm_r2, comm_r3, comm_c1, comm_c2, _, _ = find_commercial_bpf(target_fc, target_q=target_q, r_series=r_series, c_series=c_series)
         comm_params = [comm_r1, comm_r2, comm_r3, comm_c1, comm_c2]
 
-    final_fc_comm, final_q_comm, _ = loss_function(
+    # Stage 2 Verification: Simulate snapped commercial parameters
+    final_fc_comm, final_q_comm, err_comm = loss_function(
         comm_params, order=order, filter_type=filter_type,
         ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q,
         output_data_file=COMMERCIAL_SIM_DATA_PATH
     )
     freqs_comm, mags_comm = parse_simulation_data(COMMERCIAL_SIM_DATA_PATH)
+
+    if len(freqs_comm) < 2 or len(mags_comm) < 2 or any(not np.isfinite(f) for f in freqs_comm) or any(not np.isfinite(m) for m in mags_comm):
+        err_msg = "Commercial snapped simulation verification generated insufficient, non-finite, or empty frequency response data."
+        if raise_on_error:
+            raise RuntimeError(err_msg)
+        return {
+            "success": False,
+            "error": err_msg,
+            "failure_stage": "commercial_verification",
+            "filter_type": filter_type,
+            "order": order,
+            "target_fc": float(target_fc),
+            "target_q": float(target_q),
+            "optimization_method": optimization_method,
+        }
+
+    if not np.isfinite(final_fc_comm) or final_fc_comm <= 0.0 or err_comm >= 1e11:
+        err_msg = f"Commercial snapped simulation verification produced invalid cutoff frequency: {final_fc_comm} Hz."
+        if raise_on_error:
+            raise RuntimeError(err_msg)
+        return {
+            "success": False,
+            "error": err_msg,
+            "failure_stage": "commercial_verification",
+            "filter_type": filter_type,
+            "order": order,
+            "target_fc": float(target_fc),
+            "target_q": float(target_q),
+            "optimization_method": optimization_method,
+        }
 
     if filter_type == "bpf":
         _, _, bandwidth_comm = extract_cutoff_frequency(freqs_comm, mags_comm, filter_type="bpf")
@@ -618,6 +789,7 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
 
     return {
         "success": True,
+        "optimization_method": optimization_method,
         "filter_type": filter_type,
         "order": order,
         "top_key": top_key,
@@ -632,6 +804,7 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
         "init_fc": float(init_fc),
         "init_q": float(init_q),
         "opt_iterations": opt_iterations,
+        "opt_message": opt_message,
         "opt_params": [float(p) for p in opt_params],
         "final_fc_opt": float(final_fc_opt),
         "final_q_opt": float(final_q_opt),
@@ -904,7 +1077,10 @@ def main():
             print(f"  Step {step:3d} | fc = {fc:8.2f} Hz | Q = {q:.3f} | Error = {err:10.2e}", flush=True)
 
     print("-" * 76, flush=True)
-    print("Stage 1: Running continuous numerical optimization (Nelder-Mead simplex)...", flush=True)
+    if filter_type == "lpf" and order == 4:
+        print("Stage 1: Running exact analytical closed-form Butterworth pole-placement sizing...", flush=True)
+    else:
+        print("Stage 1: Running continuous numerical optimization (Nelder-Mead simplex)...", flush=True)
 
     result = synthesize_filter(
         filter_type=filter_type, order=order, target_fc=target_fc, target_q=target_q,
@@ -912,8 +1088,16 @@ def main():
         r_tol=r_tol, c_tol=c_tol, progress_callback=print_progress
     )
 
+    if not result.get("success", False):
+        print(f"\n[ERROR] Filter synthesis failed at stage '{result.get('failure_stage', 'optimization')}':", file=sys.stderr)
+        print(f"        {result.get('error')}", file=sys.stderr)
+        sys.exit(1)
+
     print("-" * 76, flush=True)
-    print(f"Continuous optimization completed (Iterations: {result['opt_iterations']})!", flush=True)
+    if result["optimization_method"] == "analytical_closed_form":
+        print(f"Analytical closed-form sizing completed successfully!", flush=True)
+    else:
+        print(f"Continuous optimization completed (Iterations: {result['opt_iterations']})!", flush=True)
     print(f"Stage 2: Snapped to standard commercial components ({r_series} / {c_series}).", flush=True)
 
     generate_bode_plot(
