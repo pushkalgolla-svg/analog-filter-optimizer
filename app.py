@@ -5,6 +5,8 @@ Built with Streamlit, SciPy, and ngspice.
 
 import math
 from pathlib import Path
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -191,26 +193,27 @@ if run_btn or st.session_state.results is None:
                 ngspice_bin=ngspice_bin, fallback=(not ngspice_bin), output_plot=mc_plot_path
             )
             n_trials = len(fcs_mc)
-            mu_fc = float(np.mean(fcs_mc))
-            s_fc = float(np.std(fcs_mc, ddof=1)) if n_trials > 1 else float(np.std(fcs_mc))
-            se_fc = s_fc / math.sqrt(n_trials)
-            mc_results = {
-                "fcs": fcs_mc,
-                "qs": qs_mc,
-                "yield_2": y2,
-                "yield_5": y5,
-                "plot_path": mc_plot_path,
-                "trials": n_trials,
-                "r_tol": r_tol,
-                "c_tol": c_tol,
-                "mu_fc": mu_fc,
-                "s_fc": s_fc,
-                "se_fc": se_fc,
-                "ci_mean": (mu_fc - 1.96 * se_fc, mu_fc + 1.96 * se_fc),
-                "dist_band": (mu_fc - 1.96 * s_fc, mu_fc + 1.96 * s_fc),
-                "p2_5": float(np.percentile(fcs_mc, 2.5)),
-                "p97_5": float(np.percentile(fcs_mc, 97.5))
-            }
+            if n_trials > 0:
+                mu_fc = float(np.mean(fcs_mc))
+                s_fc = float(np.std(fcs_mc, ddof=1)) if n_trials > 1 else float(np.std(fcs_mc))
+                se_fc = s_fc / math.sqrt(n_trials)
+                mc_results = {
+                    "fcs": fcs_mc,
+                    "qs": qs_mc,
+                    "yield_2": y2,
+                    "yield_5": y5,
+                    "plot_path": mc_plot_path,
+                    "trials": n_trials,
+                    "r_tol": r_tol,
+                    "c_tol": c_tol,
+                    "mu_fc": mu_fc,
+                    "s_fc": s_fc,
+                    "se_fc": se_fc,
+                    "ci_mean": (mu_fc - 1.96 * se_fc, mu_fc + 1.96 * se_fc),
+                    "dist_band": (mu_fc - 1.96 * s_fc, mu_fc + 1.96 * s_fc),
+                    "p2_5": float(np.percentile(fcs_mc, 2.5)),
+                    "p97_5": float(np.percentile(fcs_mc, 97.5))
+                }
 
         st.session_state.results = {
             "filter_type": filter_type,
@@ -304,9 +307,11 @@ with tab_bode:
     t_fc = res["target_fc"]
 
     # Continuous numerical optimization response (Stage 1)
-    if "freqs_opt" in res and res["freqs_opt"] and "mags_opt" in res and res["mags_opt"]:
+    freqs_opt = res.get("freqs_opt")
+    mags_opt = res.get("mags_opt")
+    if freqs_opt is not None and mags_opt is not None and len(freqs_opt) > 0 and len(mags_opt) > 0:
         ax.semilogx(
-            res["freqs_opt"], res["mags_opt"],
+            freqs_opt, mags_opt,
             color="#ff7f0e", linestyle="--", linewidth=1.8, alpha=0.85,
             label=f"Continuous Optimal (fc={res.get('final_fc_opt', t_fc):.1f} Hz, err={res.get('pct_err_opt', 0.0):.2f}%)"
         )

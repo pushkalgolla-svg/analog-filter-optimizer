@@ -19,7 +19,10 @@ from unittest.mock import patch
 
 # Add project root and scripts directory to sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from synthesize import (
     snap_to_e_series,
@@ -671,6 +674,37 @@ class TestOptimizerFailureHandling(unittest.TestCase):
                     raise_on_error=True
                 )
             self.assertIn("failed to converge", str(ctx.exception))
+
+
+class TestStreamlitDashboard(unittest.TestCase):
+    """Regression tests ensuring Streamlit dashboard renders without NumPy truthiness or UI errors."""
+
+    def test_app_renders_with_numpy_frequency_arrays(self):
+        """app.py renders all tabs cleanly when freqs_opt and mags_opt are NumPy arrays."""
+        import numpy as np
+        from streamlit.testing.v1 import AppTest
+        import scripts.synthesize as syn
+
+        def fast_mc(*args, **kwargs):
+            out_plot = kwargs.get("output_plot")
+            if out_plot and not Path(out_plot).exists():
+                Path(out_plot).parent.mkdir(parents=True, exist_ok=True)
+                # Minimal 1x1 PNG so st.image() renders without overwriting tracked assets
+                Path(out_plot).write_bytes(
+                    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+                    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc`\x00\x00"
+                    b"\x00\x02\x00\x01H\xaf\xa4q\x00\x00\x00\x00IEND\xaeB`\x82"
+                )
+            return np.array([998.0, 1000.0, 1002.0]), np.array([0.706, 0.707, 0.708]), 100.0, 100.0
+
+        with patch.object(syn, "find_ngspice", return_value=None), \
+             patch.object(syn, "run_monte_carlo_analysis", side_effect=fast_mc):
+            at = AppTest.from_file(str(PROJECT_ROOT / "app.py"), default_timeout=120).run()
+
+        self.assertEqual(len(at.exception), 0, f"Unexpected app exceptions: {at.exception}")
+        self.assertEqual(len(at.error), 0, f"Unexpected app errors: {at.error}")
+        self.assertEqual(len(at.metric), 5)
+        self.assertEqual(len(at.dataframe), 2)
 
 
 if __name__ == "__main__":
