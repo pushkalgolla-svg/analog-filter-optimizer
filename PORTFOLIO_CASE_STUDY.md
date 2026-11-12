@@ -1,4 +1,4 @@
-# Portfolio Case Study: ML-Accelerated Analog Filter Synthesizer & SPICE Verification Studio
+# Portfolio Case Study: Analog Filter Synthesizer & SPICE Verification Studio
 
 **Project Repository**: `analog_filter_synthesis`  
 **Domain**: Analog Circuit Design, Electronic Design Automation (EDA), Numerical Optimization, Statistical Manufacturing Yield  
@@ -9,13 +9,13 @@
 ## 1. Resume Entry (Ready to Copy & Paste)
 
 ```markdown
-**ML-Accelerated Analog Filter EDA Synthesizer & SPICE Studio**
+**Analog Filter EDA Synthesizer & SPICE Studio**
 [Live Web Demo](https://pushkal-filter-studio.streamlit.app/) | [GitHub Repository](https://github.com/pushkalgolla-svg/analog-filter-optimizer)
 - Engineered an end-to-end EDA synthesis pipeline for active/passive analog filters (LPF, HPF, BPF, and 4th-order cascaded Butterworth biquads) achieving < 0.15% cutoff accuracy mapped to commercial EIA standard components (E12, E24, E96).
 - Implemented a continuous Nelder-Mead optimization algorithm operating in logarithmic parameter space ($log_{10} R, log_{10} C$), normalizing 12 orders of magnitude of component scale and preventing gradient explosion.
 - Built an automated SPICE co-simulation feedback loop using portable 64-bit ngspice in console batch mode with dynamic AC sweeps and automated -3dB cutoff and quality factor (Q) extraction.
-- Developed a 100-run Monte Carlo manufacturing yield analysis engine modeling Gaussian component tolerances (±1% R, ±5% C); achieved 100% yield within ±5% spec band and 68% within ±2% spec band.
-- Generated production-grade Bill of Materials (BOM) with Digikey/Mouser manufacturer part numbers (Yageo, Murata, TI OPA1678) and KiCad 8 schematic netlists ready for PCB layout.
+- Developed a 100-run Monte Carlo cutoff frequency compliance engine modeling Gaussian component tolerances (±1% R, ±5% C); achieved 100% compliance within ±5% spec band and 68% within ±2% spec band.
+- Generated production-grade Bill of Materials (BOM) strictly with verified manufacturer part numbers (Yageo, Murata, TI OPA1678) with active lifecycle checks and multi-unit IC physical package mapping (single dual-channel SOIC-8 for 4th-order cascade), along with KiCad 8 schematic netlists ready for PCB layout.
 - Deployed an interactive web studio (Streamlit) featuring live Bode plots, interactive tolerance tuning, yield scorecards, and netlist downloads.
 ```
 
@@ -29,7 +29,7 @@ This project delivers a **closed-loop Electronic Design Automation (EDA) tool** 
 
 ```mermaid
 flowchart TD
-    A["Target User Specifications<br>(fc, Type: LPF/HPF/BPF/Cascade, Q, Tolerance)"] --> B["Stage 1: Continuous ML Optimizer<br>(SciPy Nelder-Mead in Log10 Space)"]
+    A["Target User Specifications<br>(fc, Type: LPF/HPF/BPF/Cascade, Q, Tolerance)"] --> B["Stage 1: Continuous Numerical Optimizer<br>(SciPy Nelder-Mead in Log10 Space)"]
     B <--> C["Portable SPICE Engine<br>(ngspice_con.exe AC Analysis)"]
     C --> D["Continuous Optimal Parameters<br>(Ideal Convergence: Error < 0.001%)"]
     D --> E["Stage 2: Discrete EIA Snapper<br>(Coupled Grid Search: E12 / E24 / E96)"]
@@ -90,14 +90,21 @@ flowchart TD
 - **Problem**: In 2nd-order filters, $f_0$ and $Q$ depend non-linearly on component ratios ($C_1/C_2$ and $R_1/R_2$). Rounding each component independently to its nearest EIA standard value compounds errors, shifting $f_0$ by up to $15\%$ and severely distorting $Q$.
 - **Solution**: The pipeline uses **coupled grid search**: capacitors are snapped first from the standard E12 decade series, and resistors are dynamically paired from the E96 decade series using the analytical root of the quadratic characteristic equation. This guarantees cutoff accuracy within **$< 0.15\%$**.
 
-### 3. Statistical Monte Carlo Manufacturing Yield Engine
-- **Methodology**: Simulates real-world manufacturing line variation across 50 to 100 trials using Gaussian normal distributions ($3\sigma = \text{tolerance rating}$).
+### 3. Statistical Monte Carlo Cutoff Compliance Engine
+- **Methodology**: Simulates real-world component tolerance variations across 50 to 100 trials using Gaussian normal distributions ($3\sigma = \text{tolerance rating}$).
 - **Measured Results**:
   - $1\text{ kHz}$ 2nd-order Sallen-Key Butterworth with $\pm 1\%$ resistors and $\pm 5\%$ capacitors:
     - Mean Cutoff ($\mu$): **$1000.17\text{ Hz}$**
-    - Standard Deviation ($\sigma$): **$17.67\text{ Hz}$**
-    - Yield ($\pm 2\%$ spec band): **$68.0\%$**
-    - Yield ($\pm 5\%$ spec band): **$100.0\%$**
+    - Sample Standard Deviation ($s$): **$17.67\text{ Hz}$**
+    - Mean 95% Confidence Interval: **$[996.71\text{ Hz}, 1003.63\text{ Hz}]$** ($\mu \pm 1.96 \cdot s/\sqrt{N}$)
+    - Approx. 95% Distribution Band: **$[965.54\text{ Hz}, 1034.80\text{ Hz}]$** ($\mu \pm 1.96s$)
+    - Cutoff Compliance (±2% spec band): **$68.0\%$**
+    - Cutoff Compliance (±5% spec band): **$100.0\%$**
+    - *Note: Frequency yield evaluates cutoff tolerance compliance only; overall manufacturing yield additionally depends on board parasitics, op-amp saturation, and assembly defects.*
+
+### 4. Method Differentiation: Numerical Optimization vs. Analytical Closed-Form Sizing
+- **Nelder-Mead Simplex Numerical Path**: Applied to 1st-order RC, 2nd-order Sallen-Key LPF, 2nd-order Sallen-Key HPF, and 2nd-order MFB BPF. The solver dynamically navigates component interaction landscapes in $\log_{10}$ space with full failure validation (checking convergence flag, rejecting non-finite/sentinel objectives, and confirming strictly positive values).
+- **Analytical Closed-Form Sizing Path**: Applied to 4th-order Cascaded Sallen-Key LPF. Because a 4th-order Butterworth response requires exact biquad stage pole damping ($Q_1=0.5412$ and $Q_2=1.3065$), multi-variable iterative search can encounter local minima that distort pole separation. We use exact algebraic polynomial factorization to size stage parameters in closed form, followed by coupled commercial snapping and SPICE verification.
 
 ---
 

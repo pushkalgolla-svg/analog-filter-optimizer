@@ -1,10 +1,10 @@
-(export (version D) (design (source "AnalogFilterSynthesis") (tool "ML-Filter-Synthesizer"))
+(export (version D) (design (source "AnalogFilterSynthesis") (tool "Analog-Filter-Synthesizer"))
   (components
     (comp (ref R1) (value "75k Ohm") (footprint Resistor_SMD:R_0805_2012Metric))
     (comp (ref R2) (value "150k Ohm") (footprint Resistor_SMD:R_0805_2012Metric))
     (comp (ref C1) (value "1.5nF") (footprint Capacitor_SMD:C_0805_2012Metric))
     (comp (ref C2) (value "1.5nF") (footprint Capacitor_SMD:C_0805_2012Metric))
-    (comp (ref U1) (value "OPA1678") (footprint Package_SO:SOIC-8_3.9x4.9mm_P1.27mm))
+    (comp (ref U1) (value "OPA1678") (footprint Package_SO:SOIC-8_3.9x4.9mm_P1.27mm) (description "Dual Op-Amp"))
   )
   (nets
     (net (code 1) (name "IN") (node (ref C1) (pin 1)))
