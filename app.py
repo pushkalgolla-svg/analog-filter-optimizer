@@ -13,8 +13,19 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+import importlib
 import scripts.synthesize as syn
 import scripts.export_manufacturing as exp
+
+# In Streamlit Cloud hot-reload, force reload submodules to prevent stale sys.modules caching
+try:
+    importlib.reload(syn)
+    importlib.reload(exp)
+except Exception:
+    pass
+
+OPAMP_MODEL_TI = getattr(syn, "OPAMP_MODEL_TI", "ti_opa1678")
+OPAMP_MODEL_IDEAL = getattr(syn, "OPAMP_MODEL_IDEAL", "idealized")
 
 # Set page configuration
 st.set_page_config(
@@ -142,11 +153,11 @@ if is_active_circuit:
         ],
         index=0
     )
-    opamp_model = syn.OPAMP_MODEL_TI if "OPA1678" in opamp_choice else syn.OPAMP_MODEL_IDEAL
+    opamp_model = OPAMP_MODEL_TI if "OPA1678" in opamp_choice else OPAMP_MODEL_IDEAL
     v_supply = 15.0
     st.sidebar.info("⚡ Dual Supply Rails: ±15.0V with 2x 100nF Decoupling Provisions")
 else:
-    opamp_model = syn.OPAMP_MODEL_IDEAL
+    opamp_model = OPAMP_MODEL_IDEAL
     v_supply = 15.0
 
 st.sidebar.markdown("---")
