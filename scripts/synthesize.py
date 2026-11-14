@@ -559,8 +559,9 @@ def loss_function(params, order=1, filter_type="lpf", ngspice_bin=None, fallback
             actual_fc = extract_cutoff_frequency(freqs, mags, filter_type="lpf")
             if not np.isfinite(actual_fc) or actual_fc <= 0:
                 return 0.0, 0.0, SENTINEL_FAILURE_OBJ
+            rel_fc = (actual_fc - target_fc) / target_fc
             if order == 1:
-                error = (actual_fc - target_fc) ** 2
+                error = (rel_fc * 100.0) ** 2
                 return actual_fc, 0.0, error
             elif order == 2:
                 r1, r2, c1, c2 = params
@@ -569,10 +570,11 @@ def loss_function(params, order=1, filter_type="lpf", ngspice_bin=None, fallback
                 if denom <= 0 or prod <= 0:
                     return 0.0, 0.0, SENTINEL_FAILURE_OBJ
                 q_actual = math.sqrt(prod) / denom
-                error = (actual_fc - target_fc) ** 2 + 1000.0 * (q_actual - BUTTERWORTH_Q) ** 2
+                rel_q = (q_actual - BUTTERWORTH_Q) / BUTTERWORTH_Q
+                error = (rel_fc * 100.0) ** 2 + 10.0 * (rel_q * 100.0) ** 2
                 return actual_fc, q_actual, error
             elif order == 4:
-                error = (actual_fc - target_fc) ** 2
+                error = (rel_fc * 100.0) ** 2
                 return actual_fc, 0.7071, error
         elif filter_type == "hpf":
             actual_fc = extract_cutoff_frequency(freqs, mags, filter_type="hpf")
@@ -584,13 +586,17 @@ def loss_function(params, order=1, filter_type="lpf", ngspice_bin=None, fallback
             if denom <= 0 or prod <= 0:
                 return 0.0, 0.0, SENTINEL_FAILURE_OBJ
             q_actual = math.sqrt(prod) / denom
-            error = (actual_fc - target_fc) ** 2 + 1000.0 * (q_actual - BUTTERWORTH_Q) ** 2
+            rel_fc = (actual_fc - target_fc) / target_fc
+            rel_q = (q_actual - BUTTERWORTH_Q) / BUTTERWORTH_Q
+            error = (rel_fc * 100.0) ** 2 + 10.0 * (rel_q * 100.0) ** 2
             return actual_fc, q_actual, error
         elif filter_type == "bpf":
             f_peak, q_actual, _ = extract_cutoff_frequency(freqs, mags, filter_type="bpf")
             if not np.isfinite(f_peak) or f_peak <= 0:
                 return 0.0, 0.0, SENTINEL_FAILURE_OBJ
-            error = (f_peak - target_fc) ** 2 + 500.0 * (q_actual - target_q) ** 2
+            rel_fc = (f_peak - target_fc) / target_fc
+            rel_q = (q_actual - target_q) / target_q
+            error = (rel_fc * 100.0) ** 2 + 10.0 * (rel_q * 100.0) ** 2
             return f_peak, q_actual, error
     except Exception:
         return 0.0, 0.0, SENTINEL_FAILURE_OBJ
@@ -763,14 +769,16 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
     out_dir = Path(output_dir) if output_dir else OUTPUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initial parameter configuration
+    # Initial parameter configuration scaled to target_fc
     if filter_type == "lpf":
         if order == 1:
-            initial_params = [10000.0, 10.0e-9]
+            comm = find_commercial_pair_1st_order(target_fc, r_series=r_series, c_series=c_series)
+            initial_params = [comm[0], comm[1]] if comm else [10000.0 * (1000.0 / target_fc), 10.0e-9]
             comp_names = ["R1", "C1"]
             top_key = "1st_order_rc"
         elif order == 2:
-            initial_params = [10000.0, 10000.0, 22.0e-9, 10.0e-9]
+            comm = find_commercial_components_2nd_order(target_fc, r_series=r_series, c_series=c_series)
+            initial_params = list(comm[:4]) if comm else [10000.0 * (1000.0 / target_fc), 10000.0 * (1000.0 / target_fc), 22.0e-9, 10.0e-9]
             comp_names = ["R1", "R2", "C1", "C2"]
             top_key = "sallen_key_lpf"
         elif order == 4:
@@ -778,11 +786,13 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
             comp_names = ["R1_1", "R2_1", "C1_1", "C2_1", "R1_2", "R2_2", "C1_2", "C2_2"]
             top_key = "cascade4_lpf"
     elif filter_type == "hpf":
-        initial_params = [12000.0, 24000.0, 10.0e-9, 10.0e-9]
+        comm = find_commercial_hpf(target_fc, r_series=r_series, c_series=c_series)
+        initial_params = list(comm[:4]) if comm else [12000.0 * (1000.0 / target_fc), 24000.0 * (1000.0 / target_fc), 10.0e-9, 10.0e-9]
         comp_names = ["R1", "R2", "C1", "C2"]
         top_key = "sallen_key_hpf"
     elif filter_type == "bpf":
-        initial_params = [30000.0, 4500.0, 60000.0, 10.0e-9, 10.0e-9]
+        comm = find_commercial_bpf(target_fc, target_q=target_q, r_series=r_series, c_series=c_series)
+        initial_params = list(comm[:5]) if comm else [30000.0 * (1000.0 / target_fc), 4500.0 * (1000.0 / target_fc), 60000.0 * (1000.0 / target_fc), 10.0e-9, 10.0e-9]
         comp_names = ["R1", "R2", "R3", "C1", "C2"]
         top_key = "mfb_bpf"
 
@@ -839,11 +849,12 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
 
             res = minimize(
                 optimizer_objective, x0, method="Nelder-Mead",
-                options={"maxiter": 300, "xatol": 1e-4, "fatol": 1e-4}
+                options={"maxiter": 300, "xatol": 1e-3, "fatol": 1e-3}
             )
 
             # 1. Validate optimizer convergence
-            if not getattr(res, "success", False):
+            # If maxiter reached but objective reached near-optimal solution (< 3% relative error, fun < 10.0), accept
+            if not getattr(res, "success", False) and getattr(res, "fun", float("inf")) >= 10.0:
                 err_msg = f"Nelder-Mead continuous optimization failed to converge: {getattr(res, 'message', 'Optimization unsuccessful')}."
                 if raise_on_error:
                     raise RuntimeError(err_msg)
