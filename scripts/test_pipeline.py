@@ -124,10 +124,10 @@ def run_checks():
 
     print("[TEST] 10. Checking BOM and KiCad netlist exporter...")
     test_bom_data = generate_bom_data("sallen_key_lpf", {"R1": 97600.0, "R2": 52300.0, "C1": 3.3e-9, "C2": 1.5e-9})
-    assert len(test_bom_data) == 7, f"Expected 7 BOM items (R1, R2, C1, C2, U1, C_DEC1, C_DEC2), got {len(test_bom_data)}"
+    assert len(test_bom_data) == 10, f"Expected 10 BOM items (R1, R2, C1, C2, U1, C_DEC1, C_DEC2, J_IN, J_OUT, J_PWR), got {len(test_bom_data)}"
 
     bom_map = {row["RefDes"]: row for row in test_bom_data}
-    expected_refdes = {"R1", "R2", "C1", "C2", "U1", "C_DEC1", "C_DEC2"}
+    expected_refdes = {"R1", "R2", "C1", "C2", "U1", "C_DEC1", "C_DEC2", "J_IN", "J_OUT", "J_PWR"}
     assert set(bom_map.keys()) == expected_refdes, f"BOM RefDes mismatch: expected {expected_refdes}, got {set(bom_map.keys())}"
 
     # Verify component values and packages
@@ -138,6 +138,9 @@ def run_checks():
     assert bom_map["U1"]["Value"] == "OPA1678", f"U1 value mismatch: {bom_map['U1']['Value']}"
     assert bom_map["C_DEC1"]["Value"] == "100nF", f"C_DEC1 value mismatch: {bom_map['C_DEC1']['Value']}"
     assert bom_map["C_DEC2"]["Value"] == "100nF", f"C_DEC2 value mismatch: {bom_map['C_DEC2']['Value']}"
+    assert bom_map["J_IN"]["Value"] == "Conn_01x02", f"J_IN value mismatch: {bom_map['J_IN']['Value']}"
+    assert bom_map["J_OUT"]["Value"] == "Conn_01x02", f"J_OUT value mismatch: {bom_map['J_OUT']['Value']}"
+    assert bom_map["J_PWR"]["Value"] == "Conn_01x03", f"J_PWR value mismatch: {bom_map['J_PWR']['Value']}"
 
     # Verify active verified manufacturer part metadata
     assert bom_map["U1"]["Manufacturer"] == "Texas Instruments"
@@ -154,6 +157,12 @@ def run_checks():
     assert bom_map["C_DEC2"]["Lifecycle Status"] == "Active"
     assert bom_map["C_DEC2"]["Component Tolerance"] == "+/-10.0%"
 
+    # Verify generic unverified connector metadata (do not fabricate MPNs)
+    for j_ref in ["J_IN", "J_OUT", "J_PWR"]:
+        assert bom_map[j_ref]["Manufacturer"] == "Generic"
+        assert bom_map[j_ref]["Manufacturer Part Number"] == "Generic - MPN not verified"
+        assert bom_map[j_ref]["Lifecycle Status"] == "Unverified"
+
     test_bom_csv = PROJECT_ROOT / "output" / "test_BOM.csv"
     export_bom_csv(test_bom_data, test_bom_csv)
     assert test_bom_csv.exists(), "BOM CSV file was not created!"
@@ -164,25 +173,34 @@ def run_checks():
     assert "(export (version D)" in net_str
     assert "Preliminary EDA Netlist Export" in net_str
 
-    # Validate KiCad power connections, pin mapping, decoupling and termination
+    # Validate KiCad power connections, pin mapping, decoupling, termination, and external connectors
     net_lines = net_str.splitlines()
     assert any('(comp (ref U1) (value "OPA1678")' in l for l in net_lines), "U1 component definition missing"
     assert any('(comp (ref C_DEC1) (value "100nF")' in l for l in net_lines), "C_DEC1 component definition missing"
     assert any('(comp (ref C_DEC2) (value "100nF")' in l for l in net_lines), "C_DEC2 component definition missing"
+    assert any('(comp (ref J_IN) (value "Conn_01x02")' in l for l in net_lines), "J_IN component definition missing"
+    assert any('(comp (ref J_OUT) (value "Conn_01x02")' in l for l in net_lines), "J_OUT component definition missing"
+    assert any('(comp (ref J_PWR) (value "Conn_01x03")' in l for l in net_lines), "J_PWR component definition missing"
+
+    in_net = [l for l in net_lines if '(name "IN")' in l]
+    assert in_net and '(node (ref J_IN) (pin 1))' in in_net[0], "J_IN Pin 1 not connected to IN"
+
+    out_net = [l for l in net_lines if '(name "OUT")' in l]
+    assert out_net and '(node (ref J_OUT) (pin 1))' in out_net[0], "J_OUT Pin 1 not connected to OUT"
 
     vplus_net = [l for l in net_lines if '(name "V+")' in l]
-    assert vplus_net and '(node (ref U1) (pin 8))' in vplus_net[0] and '(node (ref C_DEC1) (pin 1))' in vplus_net[0], "V+ net misconnected"
+    assert vplus_net and '(node (ref U1) (pin 8))' in vplus_net[0] and '(node (ref C_DEC1) (pin 1))' in vplus_net[0] and '(node (ref J_PWR) (pin 1))' in vplus_net[0], "V+ net misconnected"
 
     vminus_net = [l for l in net_lines if '(name "V-")' in l]
-    assert vminus_net and '(node (ref U1) (pin 4))' in vminus_net[0] and '(node (ref C_DEC2) (pin 1))' in vminus_net[0], "V- net misconnected"
+    assert vminus_net and '(node (ref U1) (pin 4))' in vminus_net[0] and '(node (ref C_DEC2) (pin 1))' in vminus_net[0] and '(node (ref J_PWR) (pin 3))' in vminus_net[0], "V- net misconnected"
 
     gnd_net = [l for l in net_lines if '(name "GND")' in l]
-    assert gnd_net and '(node (ref U1) (pin 5))' in gnd_net[0] and '(node (ref C_DEC1) (pin 2))' in gnd_net[0] and '(node (ref C_DEC2) (pin 2))' in gnd_net[0], "GND net misconnected"
+    assert gnd_net and '(node (ref U1) (pin 5))' in gnd_net[0] and '(node (ref C_DEC1) (pin 2))' in gnd_net[0] and '(node (ref C_DEC2) (pin 2))' in gnd_net[0] and '(node (ref J_PWR) (pin 2))' in gnd_net[0] and '(node (ref J_IN) (pin 2))' in gnd_net[0] and '(node (ref J_OUT) (pin 2))' in gnd_net[0], "GND net misconnected"
 
     unused_b_net = [l for l in net_lines if '(name "UNUSED_B")' in l]
     assert unused_b_net and '(node (ref U1) (pin 6))' in unused_b_net[0] and '(node (ref U1) (pin 7))' in unused_b_net[0], "Unused B channel termination missing"
 
-    print("       BOM CSV (7 items) and KiCad netlist validated successfully. PASS!")
+    print("       BOM CSV (10 items) and KiCad netlist with connectors validated successfully. PASS!")
 
     print("[TEST] 11. Checking Monte Carlo yield analysis...")
     test_mc_plot = PROJECT_ROOT / "output" / "test_mc_plot.png"

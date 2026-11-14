@@ -214,7 +214,13 @@ def build_spice_netlist(params, order=1, filter_type="lpf", target_fc=TARGET_CUT
     f_stop = min(1e8, target_fc * 100.0)
     f_start_str = f"{f_start:.2f}"
     f_stop_str = f"{f_stop:.2f}"
-    out_file_str = str(output_data_file).replace("\\", "/")
+
+    # Use portable relative path for output data file
+    try:
+        rel_out = Path(output_data_file).relative_to(PROJECT_ROOT)
+        out_file_str = rel_out.as_posix()
+    except (ValueError, Exception):
+        out_file_str = Path(output_data_file).name if Path(output_data_file).is_absolute() else str(output_data_file).replace("\\", "/")
 
     is_active = (order >= 2) or (filter_type in ["hpf", "bpf"])
     use_ti_model = (
@@ -224,7 +230,14 @@ def build_spice_netlist(params, order=1, filter_type="lpf", target_fc=TARGET_CUT
     )
 
     if use_ti_model:
-        lib_ref = "OPA167x.LIB" if model_lib_path == "OPA167x.LIB" else Path(model_lib_path).resolve().as_posix()
+        if str(model_lib_path) == "OPA167x.LIB":
+            lib_ref = "OPA167x.LIB"
+        else:
+            try:
+                rel_lib = Path(model_lib_path).relative_to(PROJECT_ROOT)
+                lib_ref = rel_lib.as_posix()
+            except (ValueError, Exception):
+                lib_ref = Path(model_lib_path).name if Path(model_lib_path).is_absolute() else str(model_lib_path).replace("\\", "/")
         model_mode_desc = "Texas Instruments OPA1678 Macro-Model (Rev E / SBOS855D)"
         model_include = f'.include "{lib_ref}"'
         power_supply_block = (
@@ -1060,15 +1073,14 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
     kicad_net_path = out_dir / f"{top_key}_kicad.net"
     kicad_text = export_kicad_netlist(top_key, comp_dict, kicad_net_path)
 
+    # Save isolated request simulation netlist inside out_dir (do not write to shared CURRENT_SIM_PATH)
+    spice_netlist_path = out_dir / f"{top_key}_sim.cir"
     spice_netlist_text = build_spice_netlist(
         comm_params, order=order, filter_type=filter_type, target_fc=target_fc,
         opamp_model=opamp_model, v_supply=v_supply,
         output_data_file=final_comm_data_file, model_lib_path=TI_OPA167X_LIB_PATH
     )
-    try:
-        CURRENT_SIM_PATH.write_text(spice_netlist_text, encoding="utf-8")
-    except OSError:
-        pass
+    spice_netlist_path.write_text(spice_netlist_text, encoding="utf-8")
 
     return {
         "success": True,
@@ -1107,7 +1119,9 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
         "bom_csv_path": bom_csv_path,
         "kicad_net_path": kicad_net_path,
         "kicad_text": kicad_text,
+        "spice_netlist_path": spice_netlist_path,
         "spice_text": spice_netlist_text,
+        "output_dir": out_dir,
         "sim_engine": "ngspice" if not use_fallback else "analytical",
     }
 

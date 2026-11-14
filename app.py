@@ -4,6 +4,7 @@ Built with Streamlit, SciPy, and ngspice.
 """
 
 import math
+import uuid
 from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
@@ -162,7 +163,13 @@ else:
 
 run_btn = st.sidebar.button("⚡ Synthesize & Verify Filter in SPICE", type="primary", use_container_width=True)
 
-# State Management
+# State Management & Multi-User Session Workspace Isolation
+if "session_id" not in st.session_state:
+    st.session_state.session_id = uuid.uuid4().hex[:12]
+
+session_output_dir = OUTPUT_DIR / f"session_{st.session_state.session_id}"
+session_output_dir.mkdir(parents=True, exist_ok=True)
+
 if "results" not in st.session_state:
     st.session_state.results = None
 
@@ -180,7 +187,8 @@ if run_btn or st.session_state.results is None:
                 ngspice_bin=ngspice_bin,
                 fallback=(not ngspice_bin),
                 opamp_model=opamp_model,
-                v_supply=v_supply
+                v_supply=v_supply,
+                output_dir=session_output_dir
             )
             if not synth_res.get("success", False):
                 st.error(f"❌ Synthesis failed at stage '{synth_res.get('failure_stage', 'optimization')}': {synth_res.get('error', 'Optimization failed')}")
@@ -208,7 +216,7 @@ if run_btn or st.session_state.results is None:
         # Monte Carlo Cutoff Compliance Analysis
         mc_results = None
         if enable_mc:
-            mc_plot_path = OUTPUT_DIR / "app_mc_plot.png"
+            mc_plot_path = session_output_dir / "app_mc_plot.png"
             mc_res = syn.run_monte_carlo_analysis(
                 comm_params, order=order, filter_type=filter_type, target_fc=target_fc,
                 target_q=target_q, r_tol=r_tol, c_tol=c_tol, trials=mc_trials,
@@ -461,8 +469,14 @@ with tab_netlist:
 
     st.markdown("---")
     st.subheader("Active ngspice Netlist (.cir)")
-    st.caption("SPICE netlist executed by ngspice console binary.")
+    st.caption("SPICE netlist executed by ngspice console binary incorporating macro-model / subcircuits.")
     st.code(res["spice_text"], language="spice")
+    st.download_button(
+        label="📥 Download SPICE Netlist (.cir)",
+        data=res["spice_text"],
+        file_name=f"{res['top_key']}_sim.cir",
+        mime="text/plain"
+    )
 
 # Tab 5: Circuit Theory & Math
 with tab_theory:

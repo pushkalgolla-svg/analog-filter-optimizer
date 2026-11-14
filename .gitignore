@@ -24,3 +24,5 @@ tools/
 output/test_*
 output/app_sim_data.txt
 output/mc_temp_sim.txt
+output/session_*
+output/*_sim.cir

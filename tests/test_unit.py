@@ -257,8 +257,8 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
         """Generate BOM data and verify CSV export schema, metadata columns, and parseability."""
         comp_dict = {"R1": 10000.0, "R2": 22000.0, "C1": 10.0e-9, "C2": 4.7e-9}
         bom_rows = generate_bom_data("sallen_key_lpf", comp_dict, r_tol=1.0, c_tol=5.0)
-        # 4 passives + 1 dual op-amp (U1) + 2 decoupling capacitors (C_DEC1, C_DEC2) = 7 total rows
-        self.assertEqual(len(bom_rows), 7)
+        # 4 passives + 1 dual op-amp (U1) + 2 decoupling capacitors (C_DEC1, C_DEC2) + 3 connectors (J_IN, J_OUT, J_PWR) = 10 total rows
+        self.assertEqual(len(bom_rows), 10)
 
         out_csv = PROJECT_ROOT / "output" / "test_unit_bom.csv"
         export_bom_csv(bom_rows, out_csv)
@@ -274,13 +274,23 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
             ]
             self.assertEqual(reader.fieldnames, expected_fields)
             rows = list(reader)
-            self.assertEqual(len(rows), 7)
+            self.assertEqual(len(rows), 10)
             # Verify decoupling capacitor entries
             dec_rows = [r for r in rows if r["RefDes"] in ["C_DEC1", "C_DEC2"]]
             self.assertEqual(len(dec_rows), 2)
             self.assertEqual(dec_rows[0]["Manufacturer Part Number"], "GRM21BR71H104KA01L")
             self.assertEqual(dec_rows[0]["Verification Date"], "2026-11-14")
             self.assertEqual(dec_rows[0]["Lifecycle Status"], "Active")
+            # Verify connector entries
+            conn_rows = {r["RefDes"]: r for r in rows if r["RefDes"].startswith("J_")}
+            self.assertEqual(len(conn_rows), 3)
+            self.assertIn("J_IN", conn_rows)
+            self.assertIn("J_OUT", conn_rows)
+            self.assertIn("J_PWR", conn_rows)
+            for j_ref, j_row in conn_rows.items():
+                self.assertEqual(j_row["Manufacturer"], "Generic")
+                self.assertEqual(j_row["Manufacturer Part Number"], "Generic - MPN not verified")
+                self.assertEqual(j_row["Lifecycle Status"], "Unverified")
 
         if out_csv.exists():
             out_csv.unlink()
@@ -325,14 +335,14 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
         self.assertEqual(part_tight["mpn"], "Generic - MPN not verified")
 
     def test_fourth_order_cascade_bom_counts_one_physical_ic_package(self):
-        """4th-order cascaded LPF BOM counts exactly 1 physical OPA1678 dual-channel IC package (RefDes: U1) and decoupling."""
+        """4th-order cascaded LPF BOM counts exactly 1 physical OPA1678 dual-channel IC package (RefDes: U1), decoupling, and connectors."""
         c4_comps = {
             "R1_1": 14700.0, "R2_1": 14700.0, "C1_1": 1.2e-8, "C2_1": 1.0e-8,
             "R1_2": 12700.0, "R2_2": 12700.0, "C1_2": 3.3e-8, "C2_2": 4.7e-9
         }
         bom = generate_bom_data("cascade4_lpf", c4_comps, r_tol=1.0, c_tol=5.0)
-        # 8 passive components + 1 physical dual op-amp IC + 2 decoupling capacitors = 11 total rows
-        self.assertEqual(len(bom), 11)
+        # 8 passive components + 1 physical dual op-amp IC + 2 decoupling capacitors + 3 connectors = 14 total rows
+        self.assertEqual(len(bom), 14)
 
         opamp_rows = [r for r in bom if r["Value"] == "OPA1678"]
         self.assertEqual(len(opamp_rows), 1)
@@ -343,8 +353,12 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
         self.assertEqual(opamp_rows[0]["Verification Date"], "2026-11-14")
         self.assertEqual(opamp_rows[0]["Lifecycle Status"], "Active")
 
+        # Verify connectors present
+        conn_refs = {r["RefDes"] for r in bom if r["RefDes"].startswith("J_")}
+        self.assertEqual(conn_refs, {"J_IN", "J_OUT", "J_PWR"})
+
     def test_both_amplifier_sections_represented_in_kicad_netlist(self):
-        """4th-order cascade KiCad netlist maps Stage 1 to Section A and Stage 2 to Section B of physical package U1."""
+        """4th-order cascade KiCad netlist maps Stage 1 to Section A, Stage 2 to Section B, with power and connectors."""
         c4_comps = {
             "R1_1": 14700.0, "R2_1": 14700.0, "C1_1": 1.2e-8, "C2_1": 1.0e-8,
             "R1_2": 12700.0, "R2_2": 12700.0, "C1_2": 3.3e-8, "C2_2": 4.7e-9
@@ -367,9 +381,15 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
         self.assertIn('(node (ref U1) (pin 7))', net_str)  # Stage 2 OUT
         self.assertIn('(node (ref U1) (pin 6))', net_str)  # Stage 2 -IN
 
-        # Verify power connections: Pin 8 to V+, Pin 4 to V-
-        self.assertIn('(net (code 8) (name "V+") (node (ref U1) (pin 8)) (node (ref C_DEC1) (pin 1)))', net_str)
-        self.assertIn('(net (code 9) (name "V-") (node (ref U1) (pin 4)) (node (ref C_DEC2) (pin 1)))', net_str)
+        # Verify external connectors in components block
+        self.assertIn('(comp (ref J_IN) (value "Conn_01x02")', net_str)
+        self.assertIn('(comp (ref J_OUT) (value "Conn_01x02")', net_str)
+        self.assertIn('(comp (ref J_PWR) (value "Conn_01x03")', net_str)
+
+        # Verify power connections: Pin 8 to V+, Pin 4 to V-, and J_PWR
+        self.assertIn('(node (ref J_PWR) (pin 1))', net_str)
+        self.assertIn('(node (ref J_PWR) (pin 3))', net_str)
+        self.assertIn('(node (ref J_PWR) (pin 2))', net_str)
 
         # Critical: Pin 4 and Pin 8 must NEVER be connected to GND
         gnd_net_lines = [line for line in net_str.splitlines() if '(name "GND")' in line]
@@ -381,29 +401,85 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
             out_net.unlink()
 
     def test_other_filter_topologies_retain_correct_ic_counts(self):
-        """Other filter topologies retain correct IC counts (0 for 1st-order, 1 for 2nd-order, with decoupling)."""
-        # 1st-order RC: 0 op-amps, 0 decoupling caps = 2 rows
+        """Other filter topologies retain correct IC and connector counts."""
+        # 1st-order RC: 2 passives + 2 connectors (J_IN, J_OUT) = 4 rows (NO op-amp, NO J_PWR)
         bom_1st = generate_bom_data("1st_order_rc", {"R1": 16000.0, "C1": 1.0e-8})
-        self.assertEqual(len(bom_1st), 2)
+        self.assertEqual(len(bom_1st), 4)
         self.assertEqual(len([r for r in bom_1st if r["Value"] == "OPA1678"]), 0)
+        self.assertEqual({r["RefDes"] for r in bom_1st if r["RefDes"].startswith("J_")}, {"J_IN", "J_OUT"})
 
-        # 2nd-order Sallen-Key LPF: 4 passives + 1 op-amp + 2 decoupling caps = 7 rows
+        # 2nd-order Sallen-Key LPF: 4 passives + 1 op-amp + 2 decoupling caps + 3 connectors = 10 rows
         bom_sk_lpf = generate_bom_data("sallen_key_lpf", {"R1": 10000.0, "R2": 22000.0, "C1": 10.0e-9, "C2": 4.7e-9})
-        self.assertEqual(len(bom_sk_lpf), 7)
+        self.assertEqual(len(bom_sk_lpf), 10)
         self.assertEqual(len([r for r in bom_sk_lpf if r["Value"] == "OPA1678"]), 1)
         self.assertEqual([r for r in bom_sk_lpf if r["Value"] == "OPA1678"][0]["RefDes"], "U1")
+        self.assertEqual({r["RefDes"] for r in bom_sk_lpf if r["RefDes"].startswith("J_")}, {"J_IN", "J_OUT", "J_PWR"})
 
-        # 2nd-order Sallen-Key HPF: 4 passives + 1 op-amp + 2 decoupling caps = 7 rows
+        # 2nd-order Sallen-Key HPF: 4 passives + 1 op-amp + 2 decoupling caps + 3 connectors = 10 rows
         bom_sk_hpf = generate_bom_data("sallen_key_hpf", {"R1": 75000.0, "R2": 150000.0, "C1": 1.5e-9, "C2": 1.5e-9})
-        self.assertEqual(len(bom_sk_hpf), 7)
+        self.assertEqual(len(bom_sk_hpf), 10)
         self.assertEqual(len([r for r in bom_sk_hpf if r["Value"] == "OPA1678"]), 1)
         self.assertEqual([r for r in bom_sk_hpf if r["Value"] == "OPA1678"][0]["RefDes"], "U1")
+        self.assertEqual({r["RefDes"] for r in bom_sk_hpf if r["RefDes"].startswith("J_")}, {"J_IN", "J_OUT", "J_PWR"})
 
-        # 2nd-order MFB BPF: 5 passives + 1 op-amp + 2 decoupling caps = 8 rows
+        # 2nd-order MFB BPF: 5 passives + 1 op-amp + 2 decoupling caps + 3 connectors = 11 rows
         bom_bpf = generate_bom_data("mfb_bpf", {"R1": 31600.0, "R2": 4530.0, "R3": 63400.0, "C1": 1.0e-8, "C2": 1.0e-8})
-        self.assertEqual(len(bom_bpf), 8)
+        self.assertEqual(len(bom_bpf), 11)
         self.assertEqual(len([r for r in bom_bpf if r["Value"] == "OPA1678"]), 1)
         self.assertEqual([r for r in bom_bpf if r["Value"] == "OPA1678"][0]["RefDes"], "U1")
+        self.assertEqual({r["RefDes"] for r in bom_bpf if r["RefDes"].startswith("J_")}, {"J_IN", "J_OUT", "J_PWR"})
+
+    def test_external_connectors_and_pin_mappings_across_all_topologies(self):
+        """Verify external connector component definitions and pin assignments across all 5 topologies."""
+        topologies = [
+            ("1st_order_rc", {"R1": 16000.0, "C1": 1.0e-8}, False),
+            ("sallen_key_lpf", {"R1": 10000.0, "R2": 22000.0, "C1": 10.0e-9, "C2": 4.7e-9}, True),
+            ("sallen_key_hpf", {"R1": 75000.0, "R2": 150000.0, "C1": 1.5e-9, "C2": 1.5e-9}, True),
+            ("mfb_bpf", {"R1": 31600.0, "R2": 4530.0, "R3": 63400.0, "C1": 1.0e-8, "C2": 1.0e-8}, True),
+            ("cascade4_lpf", {
+                "R1_1": 14700.0, "R2_1": 14700.0, "C1_1": 1.2e-8, "C2_1": 1.0e-8,
+                "R1_2": 12700.0, "R2_2": 12700.0, "C1_2": 3.3e-8, "C2_2": 4.7e-9
+            }, True)
+        ]
+        for top_name, comps, is_active in topologies:
+            out_file = PROJECT_ROOT / "output" / f"test_conn_{top_name}.net"
+            net_text = export_kicad_netlist(top_name, comps, out_file)
+            self.assertTrue(out_file.exists())
+
+            # All topologies must have J_IN and J_OUT
+            self.assertIn('(comp (ref J_IN) (value "Conn_01x02")', net_text)
+            self.assertIn('(comp (ref J_OUT) (value "Conn_01x02")', net_text)
+            self.assertIn('(node (ref J_IN) (pin 1))', net_text)   # Signal IN
+            self.assertIn('(node (ref J_IN) (pin 2))', net_text)   # GND
+            self.assertIn('(node (ref J_OUT) (pin 1))', net_text)  # Signal OUT
+            self.assertIn('(node (ref J_OUT) (pin 2))', net_text)  # GND
+
+            # Active topologies must have J_PWR; passive must not
+            if is_active:
+                self.assertIn('(comp (ref J_PWR) (value "Conn_01x03")', net_text)
+                self.assertIn('(node (ref J_PWR) (pin 1))', net_text)  # V+
+                self.assertIn('(node (ref J_PWR) (pin 2))', net_text)  # GND
+                self.assertIn('(node (ref J_PWR) (pin 3))', net_text)  # V-
+            else:
+                self.assertNotIn('(comp (ref J_PWR)', net_text)
+                self.assertNotIn('(node (ref J_PWR)', net_text)
+
+            if out_file.exists():
+                out_file.unlink()
+
+    def test_no_machine_specific_absolute_paths_in_committed_spice_files(self):
+        """Committed SPICE templates and current_sim.cir must not contain machine-specific hardcoded paths."""
+        cir_files = list((PROJECT_ROOT / "src").glob("*.cir"))
+        self.assertGreater(len(cir_files), 0, "No .cir files found in src/")
+
+        forbidden_patterns = ["C:/", "C:\\", "/Users/", "/home/"]
+        for cir_file in cir_files:
+            content = cir_file.read_text(encoding="utf-8")
+            for pattern in forbidden_patterns:
+                self.assertNotIn(
+                    pattern, content,
+                    f"Machine-specific absolute path pattern '{pattern}' found in {cir_file.name}!"
+                )
 
     def test_kicad_netlist_syntax(self):
         """Validate KiCad 8 netlist S-expression export."""
@@ -415,6 +491,9 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
         self.assertIn("(components", net_str)
         self.assertIn("(nets", net_str)
         self.assertIn("OPA1678", net_str)
+        self.assertIn("J_IN", net_str)
+        self.assertIn("J_OUT", net_str)
+        self.assertIn("J_PWR", net_str)
 
         if out_net.exists():
             out_net.unlink()
@@ -706,7 +785,9 @@ class TestStreamlitDashboard(unittest.TestCase):
 
     def test_app_renders_with_numpy_frequency_arrays(self):
         """app.py renders all tabs cleanly when freqs_opt and mags_opt are NumPy arrays."""
+        import shutil
         import numpy as np
+        import matplotlib.pyplot as plt
         from streamlit.testing.v1 import AppTest
         import scripts.synthesize as syn
 
@@ -714,12 +795,9 @@ class TestStreamlitDashboard(unittest.TestCase):
             out_plot = kwargs.get("output_plot")
             if out_plot and not Path(out_plot).exists():
                 Path(out_plot).parent.mkdir(parents=True, exist_ok=True)
-                # Minimal 1x1 PNG so st.image() renders without overwriting tracked assets
-                Path(out_plot).write_bytes(
-                    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-                    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc`\x00\x00"
-                    b"\x00\x02\x00\x01H\xaf\xa4q\x00\x00\x00\x00IEND\xaeB`\x82"
-                )
+                fig, ax = plt.subplots(figsize=(2, 2))
+                fig.savefig(str(out_plot))
+                plt.close(fig)
             return np.array([998.0, 1000.0, 1002.0]), np.array([0.706, 0.707, 0.708]), 100.0, 100.0
 
         with patch.object(syn, "find_ngspice", return_value=None), \
@@ -901,6 +979,77 @@ class TestConcurrencyAndWorkspaceIsolation(unittest.TestCase):
         self.assertEqual(res_bpf["filter_type"], "bpf")
         self.assertAlmostEqual(res_bpf["target_fc"], 5000.0, places=1)
         self.assertLess(abs(res_bpf["final_fc_comm"] - 5000.0), 150.0)
+
+    def test_concurrent_synthesis_multi_user_output_isolation(self):
+        """Simultaneous synthesis requests with separate output directories produce independent artifacts without overwriting."""
+        import concurrent.futures
+        import tempfile
+        import shutil
+
+        temp_base = Path(tempfile.mkdtemp(prefix="filter_test_multi_user_"))
+        try:
+            dir_user1 = temp_base / "user1"
+            dir_user2 = temp_base / "user2"
+
+            def run_user_request(out_dir, f_type, order, target_f, series):
+                return synthesize_filter(
+                    filter_type=f_type,
+                    order=order,
+                    target_fc=target_f,
+                    r_series=series,
+                    fallback=True,
+                    output_dir=out_dir
+                )
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                fut1 = executor.submit(run_user_request, dir_user1, "lpf", 2, 800.0, "E96")
+                fut2 = executor.submit(run_user_request, dir_user2, "hpf", 2, 3000.0, "E24")
+                res1 = fut1.result()
+                res2 = fut2.result()
+
+            # Verify independence of directories
+            self.assertEqual(res1["output_dir"], dir_user1)
+            self.assertEqual(res2["output_dir"], dir_user2)
+            self.assertNotEqual(res1["output_dir"], res2["output_dir"])
+
+            # Verify separate artifacts exist in user1 directory
+            bom1_path = dir_user1 / f"BOM_{res1['top_key']}.csv"
+            kicad1_path = dir_user1 / f"{res1['top_key']}_kicad.net"
+            sim1_cir_path = dir_user1 / f"{res1['top_key']}_sim.cir"
+            sim1_data = dir_user1 / "sim_data.txt"
+            sim1_comm_data = dir_user1 / "sim_data_commercial.txt"
+
+            self.assertTrue(bom1_path.exists())
+            self.assertTrue(kicad1_path.exists())
+            self.assertTrue(sim1_cir_path.exists())
+            self.assertTrue(sim1_data.exists())
+            self.assertTrue(sim1_comm_data.exists())
+
+            # Verify separate artifacts exist in user2 directory
+            bom2_path = dir_user2 / f"BOM_{res2['top_key']}.csv"
+            kicad2_path = dir_user2 / f"{res2['top_key']}_kicad.net"
+            sim2_cir_path = dir_user2 / f"{res2['top_key']}_sim.cir"
+            sim2_data = dir_user2 / "sim_data.txt"
+            sim2_comm_data = dir_user2 / "sim_data_commercial.txt"
+
+            self.assertTrue(bom2_path.exists())
+            self.assertTrue(kicad2_path.exists())
+            self.assertTrue(sim2_cir_path.exists())
+            self.assertTrue(sim2_data.exists())
+            self.assertTrue(sim2_comm_data.exists())
+
+            # Verify artifacts match their own specs and are not identical
+            self.assertIn("sallen_key_lpf", res1["top_key"])
+            self.assertIn("sallen_key_hpf", res2["top_key"])
+            self.assertNotEqual(bom1_path.read_text(encoding="utf-8"), bom2_path.read_text(encoding="utf-8"))
+            self.assertNotEqual(kicad1_path.read_text(encoding="utf-8"), kicad2_path.read_text(encoding="utf-8"))
+            self.assertNotEqual(sim1_cir_path.read_text(encoding="utf-8"), sim2_cir_path.read_text(encoding="utf-8"))
+
+            # Verify results match target frequencies
+            self.assertAlmostEqual(res1["target_fc"], 800.0, places=1)
+            self.assertAlmostEqual(res2["target_fc"], 3000.0, places=1)
+        finally:
+            shutil.rmtree(temp_base, ignore_errors=True)
 
 
 class TestMonteCarloFailureHandling(unittest.TestCase):

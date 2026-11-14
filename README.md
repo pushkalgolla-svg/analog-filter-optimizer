@@ -28,27 +28,34 @@ An end-to-end analog active and passive filter synthesis engine powered by conti
 - **Coupled Commercial Snapping**:
   - Discrete coupled grid search pairing standard E12/E24 capacitors with closest standard E96 resistors to maintain $< 0.15\%$ cutoff error.
 - **High-Accuracy Op-Amp Simulation Models**:
-  - **Texas Instruments OPA167x PSpice Macro-Model (Rev E / SBOS855D)**: Integrated natively into `ngspice` using isolated directory `.spiceinit` with `set ngbehavior=pslt` compatibility mode without altering pristine vendor source code.
+  - **Texas Instruments OPA167x PSpice Macro-Model (Rev E)**: Integrated natively into `ngspice` using isolated directory `.spiceinit` with `set ngbehavior=pslt` compatibility mode without altering pristine vendor source code. Model revision: Texas Instruments OPA167x PSpice Model Rev E (released 2016, revised May 2021); distinct from the hardware electrical datasheet revision (Texas Instruments OPA1678/OPA1679 Datasheet SBOS855D, revised 2023).
   - **Idealized VCVS Fallback**: High-gain voltage-controlled voltage source ($A_{OL} = 100,000$) explicitly retained and labeled as an idealized benchmark.
   - **Model Provenance**: Pristine vendor model preserved in `src/models/OPA167x.LIB` with recorded SHA-256 integrity checksum (`a4a2f63b714c799bd4ccbf52fa71922d2786f93fcdfcc10f0b11377194beef77`) and full provenance tracking.
-- **Production KiCad 8 Netlist & Power Architecture**:
+- **Preliminary KiCad 8 EDA Netlist Export & Power Architecture**:
+  - **Preliminary EDA Netlist Disclaimer**: Generates schematic netlists (`.net`) for PCB design import, explicitly disclaimed as preliminary EDA exports subject to PCB DRC, ERC, routing parasitics, and board-level hardware validation before physical fabrication.
+  - **External Signal & Power Connectors**:
+    - Input Signal Header (`J_IN`, 2-pin 2.54mm header): Pin 1 = `IN` (signal), Pin 2 = `GND`.
+    - Output Signal Header (`J_OUT`, 2-pin 2.54mm header): Pin 1 = `OUT` (signal), Pin 2 = `GND`.
+    - Dual Rail Power Header (`J_PWR`, 3-pin 2.54mm header for active topologies): Pin 1 = `V+` (+15V), Pin 2 = `GND` (ground reference), Pin 3 = `V-` (-15V). Passive 1st-order RC circuits omit `J_PWR`.
   - **True Dual-Rail Supplies**: Configurable $\pm 15\text{ V}$ dual supply architecture matching OPA1678 recommended operating conditions ($4.5\text{ V}$ to $36\text{ V}$).
   - **Accurate SOIC-8 Pin Mapping**: Pin 1 (OUT A), Pin 2 (-IN A), Pin 3 (+IN A), Pin 4 (V-), Pin 5 (+IN B), Pin 6 (-IN B), Pin 7 (OUT B), Pin 8 (V+). Pin 4 connects strictly to V- and is never grounded.
-  - **Power Decoupling Provisions**: Dedicated $100\text{ nF}$ 50V X7R ceramic capacitors (`C_DEC1` on V+, `C_DEC2` on V-) included in both KiCad netlists and production BOMs.
+  - **Power Decoupling Provisions**: Dedicated $100\text{ nF}$ 50V X7R ceramic capacitors (`C_DEC1` on V+, `C_DEC2` on V-) included in both KiCad netlists and BOM exports.
   - **Unused Section B Termination**: Single-stage 2nd-order filters terminate unused Channel B per Texas Instruments Application Report SLOA067 (Pin 5 tied to GND, Pins 6-7 shorted to prevent oscillation and excess supply current).
   - **Multi-Unit Package Mapping**: 4th-order cascaded filters accurately map both stages to Sections A and B of a single physical dual-channel OPA1678 (`U1`, SOIC-8).
-- **Concurrent Simulation Engine & Robust Monte Carlo**:
-  - **Thread-Safe Workspace Isolation**: Every synthesis and Monte Carlo simulation executes within an ephemeral temporary directory (`tempfile.TemporaryDirectory`), completely eliminating race conditions and file collisions (`current_sim.cir`, `sim_data.txt`) under multi-user concurrency.
+- **Multi-User Session Isolation & Concurrent Execution**:
+  - **Thread-Safe Workspace Isolation**: Every synthesis and Monte Carlo simulation executes within an ephemeral temporary directory (`tempfile.TemporaryDirectory`), completely eliminating race conditions and file collisions under multi-user concurrency.
+  - **Request-Scoped Output Isolation**: The Streamlit web studio and synthesis pipeline assign unique output directories (`output/session_<id>/`) per synthesis run, eliminating reliance on shared static file writes (`current_sim.cir`, `sim_data.txt`) across concurrent sessions.
+  - **Portable SPICE Relative Pathing**: Committed SPICE templates and generated simulation netlists use portable relative include and output paths, preventing machine-specific absolute path contamination across operating systems.
   - **Non-Convergent Trial Tracking**: Robust `MonteCarloResult` separates valid converged measurements from failed/non-convergent trials, calculating statistics and yield strictly over valid trials and flagging yield completion when non-convergent runs occur.
 - **Statistical Monte Carlo Sensitivity & Compliance Analysis**:
   - $N$-trial batch SPICE simulation modeling component manufacturing tolerances (Gaussian distribution with $3\sigma = \text{tolerance}$).
   - Computes sample mean ($\mu$), sample standard deviation ($s$), Mean 95% Confidence Interval ($\mu \pm 1.96 \cdot s/\sqrt{N}$), Approximate 95% Distribution Band ($\mu \pm 1.96s$), and Empirical 95% Percentile Interval ($[P_{2.5}, P_{97.5}]$).
   - Evaluates Cutoff Frequency Compliance Yield against $\pm 2\%$ and $\pm 5\%$ specification windows (clearly identified as measuring cutoff frequency tolerance compliance, distinct from full board manufacturing yield).
-- **Production BOM & KiCad 8 Export**:
-  - Generates CSV Bill of Materials strictly from verified manufacturer part catalogues (Yageo, Murata, Texas Instruments OPA1678) or labels non-catalogue values explicitly as `Generic - MPN not verified` (no fabricated part numbers).
+- **Preliminary Bill of Materials (BOM) & Sourcing**:
+  - Generates CSV Bill of Materials strictly from verified manufacturer part catalogues (Yageo, Murata, Texas Instruments OPA1678) or labels generic/unverified components (such as generic pin headers) explicitly as `Generic - MPN not verified` with lifecycle status `Unverified` (no fabricated part numbers).
+  - Clearly identified as preliminary engineering documentation requiring physical mechanical enclosure, connector qualification, and layout design verification before production release.
   - Enforces active manufacturer lifecycle status validation (e.g., active 100V C0G Murata capacitors replacing NRND 50V parts).
   - Maps physical multi-unit IC packages accurately: the 4th-order cascaded Sallen-Key LPF maps its two amplifier sections to Units A and B of a single physical dual-channel OPA1678 (`U1`, SOIC-8) in both BOM and KiCad schematic netlists.
-  - Generates standard KiCad schematic netlists (`.net`) for PCB layout import.
 - **Interactive Web Studio**:
   - Modern Streamlit UI with live frequency tuning, interactive Bode plots, Monte Carlo yield gauges, and one-click BOM/netlist downloads.
 

@@ -857,6 +857,63 @@ def generate_bom_data(topology_type, components, r_tol=1.0, c_tol=5.0):
             }))
             item_num += 1
 
+    # External interface connectors (input, output, and active power supply)
+    # Generic pin headers - MPN unverified until enclosure/board interconnect is finalized
+    bom_rows.append(BOMRow({
+        "Item": item_num,
+        "RefDes": "J_IN",
+        "Value": "Conn_01x02",
+        "Component Tolerance": "N/A",
+        "Design / MC Tolerance": "N/A",
+        "Rating": "250V / 3A",
+        "Package": "PinHeader_1x02_P2.54mm_Vertical",
+        "Manufacturer": "Generic",
+        "Manufacturer Part Number": "Generic - MPN not verified",
+        "Description": "Input Signal Header, 2-pin 2.54mm (Pin 1: IN, Pin 2: GND)",
+        "Datasheet / Reference": "Generic 2.54mm pitch header",
+        "Verification Date": "2026-11-14",
+        "Lifecycle Status": "Unverified",
+        "Est. Unit Cost (USD)": 0.15
+    }))
+    item_num += 1
+
+    bom_rows.append(BOMRow({
+        "Item": item_num,
+        "RefDes": "J_OUT",
+        "Value": "Conn_01x02",
+        "Component Tolerance": "N/A",
+        "Design / MC Tolerance": "N/A",
+        "Rating": "250V / 3A",
+        "Package": "PinHeader_1x02_P2.54mm_Vertical",
+        "Manufacturer": "Generic",
+        "Manufacturer Part Number": "Generic - MPN not verified",
+        "Description": "Output Signal Header, 2-pin 2.54mm (Pin 1: OUT, Pin 2: GND)",
+        "Datasheet / Reference": "Generic 2.54mm pitch header",
+        "Verification Date": "2026-11-14",
+        "Lifecycle Status": "Unverified",
+        "Est. Unit Cost (USD)": 0.15
+    }))
+    item_num += 1
+
+    if is_active:
+        bom_rows.append(BOMRow({
+            "Item": item_num,
+            "RefDes": "J_PWR",
+            "Value": "Conn_01x03",
+            "Component Tolerance": "N/A",
+            "Design / MC Tolerance": "N/A",
+            "Rating": "250V / 3A",
+            "Package": "PinHeader_1x03_P2.54mm_Vertical",
+            "Manufacturer": "Generic",
+            "Manufacturer Part Number": "Generic - MPN not verified",
+            "Description": "Dual Rail Power Supply Header, 3-pin 2.54mm (Pin 1: V+, Pin 2: GND, Pin 3: V-)",
+            "Datasheet / Reference": "Generic 2.54mm pitch header",
+            "Verification Date": "2026-11-14",
+            "Lifecycle Status": "Unverified",
+            "Est. Unit Cost (USD)": 0.20
+        }))
+        item_num += 1
+
     return bom_rows
 
 
@@ -907,61 +964,67 @@ def export_kicad_netlist(topology_type, components, file_path):
         lines.append(f"    (comp (ref C_DEC1) (value \"100nF\") (footprint Capacitor_SMD:C_0805_2012Metric) (description \"V+ Decoupling\"))")
         lines.append(f"    (comp (ref C_DEC2) (value \"100nF\") (footprint Capacitor_SMD:C_0805_2012Metric) (description \"V- Decoupling\"))")
 
+    # External interface connectors
+    lines.append(f"    (comp (ref J_IN) (value \"Conn_01x02\") (footprint Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical) (description \"Input Signal Header (Pin 1: IN, Pin 2: GND)\"))")
+    lines.append(f"    (comp (ref J_OUT) (value \"Conn_01x02\") (footprint Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical) (description \"Output Signal Header (Pin 1: OUT, Pin 2: GND)\"))")
+    if is_active:
+        lines.append(f"    (comp (ref J_PWR) (value \"Conn_01x03\") (footprint Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical) (description \"Dual Rail Power Supply Header (Pin 1: V+, Pin 2: GND, Pin 3: V-)\"))")
+
     lines.append("  )")
     lines.append("  (nets")
 
     # Generate topological nets
     if "1st_order" in top_lower:
         lines.extend([
-            "    (net (code 1) (name \"IN\") (node (ref R1) (pin 1)))",
-            "    (net (code 2) (name \"OUT\") (node (ref R1) (pin 2)) (node (ref C1) (pin 1)))",
-            "    (net (code 3) (name \"GND\") (node (ref C1) (pin 2)))",
+            "    (net (code 1) (name \"IN\") (node (ref R1) (pin 1)) (node (ref J_IN) (pin 1)))",
+            "    (net (code 2) (name \"OUT\") (node (ref R1) (pin 2)) (node (ref C1) (pin 1)) (node (ref J_OUT) (pin 1)))",
+            "    (net (code 3) (name \"GND\") (node (ref C1) (pin 2)) (node (ref J_IN) (pin 2)) (node (ref J_OUT) (pin 2)))",
         ])
     elif "sallen_key_lpf" in top_lower:
         lines.extend([
-            "    (net (code 1) (name \"IN\") (node (ref R1) (pin 1)))",
+            "    (net (code 1) (name \"IN\") (node (ref R1) (pin 1)) (node (ref J_IN) (pin 1)))",
             "    (net (code 2) (name \"Net-(R1-Pad2)\") (node (ref R1) (pin 2)) (node (ref R2) (pin 1)) (node (ref C1) (pin 1)))",
             "    (net (code 3) (name \"Net-(R2-Pad2)\") (node (ref R2) (pin 2)) (node (ref C2) (pin 1)) (node (ref U1) (pin 3)))",
-            "    (net (code 4) (name \"OUT\") (node (ref C1) (pin 2)) (node (ref U1) (pin 1)) (node (ref U1) (pin 2)))",
-            "    (net (code 5) (name \"V+\") (node (ref U1) (pin 8)) (node (ref C_DEC1) (pin 1)))",
-            "    (net (code 6) (name \"V-\") (node (ref U1) (pin 4)) (node (ref C_DEC2) (pin 1)))",
-            "    (net (code 7) (name \"GND\") (node (ref C2) (pin 2)) (node (ref C_DEC1) (pin 2)) (node (ref C_DEC2) (pin 2)) (node (ref U1) (pin 5)))",
+            "    (net (code 4) (name \"OUT\") (node (ref C1) (pin 2)) (node (ref U1) (pin 1)) (node (ref U1) (pin 2)) (node (ref J_OUT) (pin 1)))",
+            "    (net (code 5) (name \"V+\") (node (ref U1) (pin 8)) (node (ref C_DEC1) (pin 1)) (node (ref J_PWR) (pin 1)))",
+            "    (net (code 6) (name \"V-\") (node (ref U1) (pin 4)) (node (ref C_DEC2) (pin 1)) (node (ref J_PWR) (pin 3)))",
+            "    (net (code 7) (name \"GND\") (node (ref C2) (pin 2)) (node (ref C_DEC1) (pin 2)) (node (ref C_DEC2) (pin 2)) (node (ref U1) (pin 5)) (node (ref J_IN) (pin 2)) (node (ref J_OUT) (pin 2)) (node (ref J_PWR) (pin 2)))",
             "    (net (code 8) (name \"UNUSED_B\") (node (ref U1) (pin 6)) (node (ref U1) (pin 7)))",
         ])
     elif "sallen_key_hpf" in top_lower:
         lines.extend([
-            "    (net (code 1) (name \"IN\") (node (ref C1) (pin 1)))",
+            "    (net (code 1) (name \"IN\") (node (ref C1) (pin 1)) (node (ref J_IN) (pin 1)))",
             "    (net (code 2) (name \"Net-(C1-Pad2)\") (node (ref C1) (pin 2)) (node (ref C2) (pin 1)) (node (ref R1) (pin 1)))",
             "    (net (code 3) (name \"Net-(C2-Pad2)\") (node (ref C2) (pin 2)) (node (ref R2) (pin 1)) (node (ref U1) (pin 3)))",
-            "    (net (code 4) (name \"OUT\") (node (ref R1) (pin 2)) (node (ref U1) (pin 1)) (node (ref U1) (pin 2)))",
-            "    (net (code 5) (name \"V+\") (node (ref U1) (pin 8)) (node (ref C_DEC1) (pin 1)))",
-            "    (net (code 6) (name \"V-\") (node (ref U1) (pin 4)) (node (ref C_DEC2) (pin 1)))",
-            "    (net (code 7) (name \"GND\") (node (ref R2) (pin 2)) (node (ref C_DEC1) (pin 2)) (node (ref C_DEC2) (pin 2)) (node (ref U1) (pin 5)))",
+            "    (net (code 4) (name \"OUT\") (node (ref R1) (pin 2)) (node (ref U1) (pin 1)) (node (ref U1) (pin 2)) (node (ref J_OUT) (pin 1)))",
+            "    (net (code 5) (name \"V+\") (node (ref U1) (pin 8)) (node (ref C_DEC1) (pin 1)) (node (ref J_PWR) (pin 1)))",
+            "    (net (code 6) (name \"V-\") (node (ref U1) (pin 4)) (node (ref C_DEC2) (pin 1)) (node (ref J_PWR) (pin 3)))",
+            "    (net (code 7) (name \"GND\") (node (ref R2) (pin 2)) (node (ref C_DEC1) (pin 2)) (node (ref C_DEC2) (pin 2)) (node (ref U1) (pin 5)) (node (ref J_IN) (pin 2)) (node (ref J_OUT) (pin 2)) (node (ref J_PWR) (pin 2)))",
             "    (net (code 8) (name \"UNUSED_B\") (node (ref U1) (pin 6)) (node (ref U1) (pin 7)))",
         ])
     elif "mfb_bpf" in top_lower:
         lines.extend([
-            "    (net (code 1) (name \"IN\") (node (ref R1) (pin 1)))",
+            "    (net (code 1) (name \"IN\") (node (ref R1) (pin 1)) (node (ref J_IN) (pin 1)))",
             "    (net (code 2) (name \"Net-(R1-Pad2)\") (node (ref R1) (pin 2)) (node (ref R2) (pin 1)) (node (ref C1) (pin 1)) (node (ref C2) (pin 1)))",
             "    (net (code 3) (name \"Net-(C1-Pad2)\") (node (ref C1) (pin 2)) (node (ref R3) (pin 1)) (node (ref U1) (pin 2)))",
-            "    (net (code 4) (name \"OUT\") (node (ref C2) (pin 2)) (node (ref R3) (pin 2)) (node (ref U1) (pin 1)))",
-            "    (net (code 5) (name \"V+\") (node (ref U1) (pin 8)) (node (ref C_DEC1) (pin 1)))",
-            "    (net (code 6) (name \"V-\") (node (ref U1) (pin 4)) (node (ref C_DEC2) (pin 1)))",
-            "    (net (code 7) (name \"GND\") (node (ref R2) (pin 2)) (node (ref U1) (pin 3)) (node (ref C_DEC1) (pin 2)) (node (ref C_DEC2) (pin 2)) (node (ref U1) (pin 5)))",
+            "    (net (code 4) (name \"OUT\") (node (ref C2) (pin 2)) (node (ref R3) (pin 2)) (node (ref U1) (pin 1)) (node (ref J_OUT) (pin 1)))",
+            "    (net (code 5) (name \"V+\") (node (ref U1) (pin 8)) (node (ref C_DEC1) (pin 1)) (node (ref J_PWR) (pin 1)))",
+            "    (net (code 6) (name \"V-\") (node (ref U1) (pin 4)) (node (ref C_DEC2) (pin 1)) (node (ref J_PWR) (pin 3)))",
+            "    (net (code 7) (name \"GND\") (node (ref R2) (pin 2)) (node (ref U1) (pin 3)) (node (ref C_DEC1) (pin 2)) (node (ref C_DEC2) (pin 2)) (node (ref U1) (pin 5)) (node (ref J_IN) (pin 2)) (node (ref J_OUT) (pin 2)) (node (ref J_PWR) (pin 2)))",
             "    (net (code 8) (name \"UNUSED_B\") (node (ref U1) (pin 6)) (node (ref U1) (pin 7)))",
         ])
     elif "cascade4" in top_lower:
         lines.extend([
-            "    (net (code 1) (name \"IN\") (node (ref R1_1) (pin 1)))",
+            "    (net (code 1) (name \"IN\") (node (ref R1_1) (pin 1)) (node (ref J_IN) (pin 1)))",
             "    (net (code 2) (name \"STAGE1_NODE\") (node (ref R1_1) (pin 2)) (node (ref R2_1) (pin 1)) (node (ref C1_1) (pin 1)))",
             "    (net (code 3) (name \"STAGE1_INP\") (node (ref R2_1) (pin 2)) (node (ref C2_1) (pin 1)) (node (ref U1) (pin 3)))",
             "    (net (code 4) (name \"STAGE1_OUT\") (node (ref C1_1) (pin 2)) (node (ref U1) (pin 1)) (node (ref U1) (pin 2)) (node (ref R1_2) (pin 1)))",
             "    (net (code 5) (name \"STAGE2_NODE\") (node (ref R1_2) (pin 2)) (node (ref R2_2) (pin 1)) (node (ref C1_2) (pin 1)))",
             "    (net (code 6) (name \"STAGE2_INP\") (node (ref R2_2) (pin 2)) (node (ref C2_2) (pin 1)) (node (ref U1) (pin 5)))",
-            "    (net (code 7) (name \"OUT\") (node (ref C1_2) (pin 2)) (node (ref U1) (pin 7)) (node (ref U1) (pin 6)))",
-            "    (net (code 8) (name \"V+\") (node (ref U1) (pin 8)) (node (ref C_DEC1) (pin 1)))",
-            "    (net (code 9) (name \"V-\") (node (ref U1) (pin 4)) (node (ref C_DEC2) (pin 1)))",
-            "    (net (code 10) (name \"GND\") (node (ref C2_1) (pin 2)) (node (ref C2_2) (pin 2)) (node (ref C_DEC1) (pin 2)) (node (ref C_DEC2) (pin 2)))",
+            "    (net (code 7) (name \"OUT\") (node (ref C1_2) (pin 2)) (node (ref U1) (pin 7)) (node (ref U1) (pin 6)) (node (ref J_OUT) (pin 1)))",
+            "    (net (code 8) (name \"V+\") (node (ref U1) (pin 8)) (node (ref C_DEC1) (pin 1)) (node (ref J_PWR) (pin 1)))",
+            "    (net (code 9) (name \"V-\") (node (ref U1) (pin 4)) (node (ref C_DEC2) (pin 1)) (node (ref J_PWR) (pin 3)))",
+            "    (net (code 10) (name \"GND\") (node (ref C2_1) (pin 2)) (node (ref C2_2) (pin 2)) (node (ref C_DEC1) (pin 2)) (node (ref C_DEC2) (pin 2)) (node (ref J_IN) (pin 2)) (node (ref J_OUT) (pin 2)) (node (ref J_PWR) (pin 2)))",
         ])
 
     lines.append("  )")
