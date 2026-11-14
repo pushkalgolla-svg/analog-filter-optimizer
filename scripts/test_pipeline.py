@@ -124,7 +124,36 @@ def run_checks():
 
     print("[TEST] 10. Checking BOM and KiCad netlist exporter...")
     test_bom_data = generate_bom_data("sallen_key_lpf", {"R1": 97600.0, "R2": 52300.0, "C1": 3.3e-9, "C2": 1.5e-9})
-    assert len(test_bom_data) == 5, f"Expected 5 BOM items, got {len(test_bom_data)}"
+    assert len(test_bom_data) == 7, f"Expected 7 BOM items (R1, R2, C1, C2, U1, C_DEC1, C_DEC2), got {len(test_bom_data)}"
+
+    bom_map = {row["RefDes"]: row for row in test_bom_data}
+    expected_refdes = {"R1", "R2", "C1", "C2", "U1", "C_DEC1", "C_DEC2"}
+    assert set(bom_map.keys()) == expected_refdes, f"BOM RefDes mismatch: expected {expected_refdes}, got {set(bom_map.keys())}"
+
+    # Verify component values and packages
+    assert bom_map["R1"]["Value"] == "97.6k Ohm", f"R1 value mismatch: {bom_map['R1']['Value']}"
+    assert bom_map["R2"]["Value"] == "52.3k Ohm", f"R2 value mismatch: {bom_map['R2']['Value']}"
+    assert bom_map["C1"]["Value"] == "3.3nF", f"C1 value mismatch: {bom_map['C1']['Value']}"
+    assert bom_map["C2"]["Value"] == "1.5nF", f"C2 value mismatch: {bom_map['C2']['Value']}"
+    assert bom_map["U1"]["Value"] == "OPA1678", f"U1 value mismatch: {bom_map['U1']['Value']}"
+    assert bom_map["C_DEC1"]["Value"] == "100nF", f"C_DEC1 value mismatch: {bom_map['C_DEC1']['Value']}"
+    assert bom_map["C_DEC2"]["Value"] == "100nF", f"C_DEC2 value mismatch: {bom_map['C_DEC2']['Value']}"
+
+    # Verify active verified manufacturer part metadata
+    assert bom_map["U1"]["Manufacturer"] == "Texas Instruments"
+    assert bom_map["U1"]["Manufacturer Part Number"] == "OPA1678IDR"
+    assert bom_map["U1"]["Lifecycle Status"] == "Active"
+
+    assert bom_map["C_DEC1"]["Manufacturer"] == "Murata Electronics"
+    assert bom_map["C_DEC1"]["Manufacturer Part Number"] == "GRM21BR71H104KA01L"
+    assert bom_map["C_DEC1"]["Lifecycle Status"] == "Active"
+    assert bom_map["C_DEC1"]["Component Tolerance"] == "+/-10.0%"
+
+    assert bom_map["C_DEC2"]["Manufacturer"] == "Murata Electronics"
+    assert bom_map["C_DEC2"]["Manufacturer Part Number"] == "GRM21BR71H104KA01L"
+    assert bom_map["C_DEC2"]["Lifecycle Status"] == "Active"
+    assert bom_map["C_DEC2"]["Component Tolerance"] == "+/-10.0%"
+
     test_bom_csv = PROJECT_ROOT / "output" / "test_BOM.csv"
     export_bom_csv(test_bom_data, test_bom_csv)
     assert test_bom_csv.exists(), "BOM CSV file was not created!"
@@ -133,7 +162,27 @@ def run_checks():
     net_str = export_kicad_netlist("sallen_key_lpf", {"R1": 97600.0, "R2": 52300.0, "C1": 3.3e-9, "C2": 1.5e-9}, test_kicad_net)
     assert test_kicad_net.exists(), "KiCad netlist file was not created!"
     assert "(export (version D)" in net_str
-    print("       BOM CSV and KiCad netlist generated successfully. PASS!")
+    assert "Preliminary EDA Netlist Export" in net_str
+
+    # Validate KiCad power connections, pin mapping, decoupling and termination
+    net_lines = net_str.splitlines()
+    assert any('(comp (ref U1) (value "OPA1678")' in l for l in net_lines), "U1 component definition missing"
+    assert any('(comp (ref C_DEC1) (value "100nF")' in l for l in net_lines), "C_DEC1 component definition missing"
+    assert any('(comp (ref C_DEC2) (value "100nF")' in l for l in net_lines), "C_DEC2 component definition missing"
+
+    vplus_net = [l for l in net_lines if '(name "V+")' in l]
+    assert vplus_net and '(node (ref U1) (pin 8))' in vplus_net[0] and '(node (ref C_DEC1) (pin 1))' in vplus_net[0], "V+ net misconnected"
+
+    vminus_net = [l for l in net_lines if '(name "V-")' in l]
+    assert vminus_net and '(node (ref U1) (pin 4))' in vminus_net[0] and '(node (ref C_DEC2) (pin 1))' in vminus_net[0], "V- net misconnected"
+
+    gnd_net = [l for l in net_lines if '(name "GND")' in l]
+    assert gnd_net and '(node (ref U1) (pin 5))' in gnd_net[0] and '(node (ref C_DEC1) (pin 2))' in gnd_net[0] and '(node (ref C_DEC2) (pin 2))' in gnd_net[0], "GND net misconnected"
+
+    unused_b_net = [l for l in net_lines if '(name "UNUSED_B")' in l]
+    assert unused_b_net and '(node (ref U1) (pin 6))' in unused_b_net[0] and '(node (ref U1) (pin 7))' in unused_b_net[0], "Unused B channel termination missing"
+
+    print("       BOM CSV (7 items) and KiCad netlist validated successfully. PASS!")
 
     print("[TEST] 11. Checking Monte Carlo yield analysis...")
     test_mc_plot = PROJECT_ROOT / "output" / "test_mc_plot.png"

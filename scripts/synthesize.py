@@ -443,12 +443,6 @@ def run_spice_simulation(params, order=1, filter_type="lpf", ngspice_bin=None,
         sim_file = Path(exec_dir) / f"sim_{uuid.uuid4().hex[:8]}.cir"
         sim_file.write_text(sim_code, encoding="utf-8")
 
-        # Also write CURRENT_SIM_PATH if in project scope for backward compatibility
-        try:
-            CURRENT_SIM_PATH.write_text(sim_code, encoding="utf-8")
-        except OSError:
-            pass
-
         cmd = [ngspice_bin, "-b", sim_file.name]
         try:
             result = subprocess.run(cmd, cwd=exec_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

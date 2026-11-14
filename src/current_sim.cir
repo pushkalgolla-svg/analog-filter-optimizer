@@ -1,6 +1,6 @@
 * Parameterized 2nd-Order Active Sallen-Key Low-Pass Filter
 * Active Amplifier Mode: Texas Instruments OPA1678 Macro-Model (Rev E / SBOS855D)
-.include "OPA167x.LIB"
+.include "C:/Users/91900/.gemini/antigravity/scratch/analog_filter_synthesis/src/models/OPA167x.LIB"
 
 * Independent AC Input Voltage Source
 Vin in 0 ac 1.0
@@ -14,10 +14,10 @@ Cdec1 vcc 0 100n
 Cdec2 vee 0 100n
 
 * Sallen-Key 2nd-Order Low-Pass Filter Network
-R1 in n1 2.95580713e+03
-R2 n1 inp 1.80461175e+03
-C1 n1 out 1.00097015e-07
-C2 inp 0 4.61046733e-08
+R1 in n1 9.76000000e+04
+R2 n1 inp 5.23000000e+04
+C1 n1 out 3.30000000e-09
+C2 inp 0 1.50000000e-09
 
 * Operational Amplifier Subsystem
 * Operational Amplifier Subsystem (Dual OPA1678 SOIC-8)
@@ -31,7 +31,7 @@ XU1B 0 out_b vcc vee out_b OPA167x
 set wr_singlescale
 ac dec 100 10.00 100000.00
 let vdb_out = db(v(out))
-wrdata sim_out_227c3664.txt vdb_out
+wrdata C:/Users/91900/.gemini/antigravity/scratch/analog_filter_synthesis/output/sim_data_commercial.txt vdb_out
 quit
 .endc
 .end

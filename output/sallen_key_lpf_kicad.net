@@ -1,10 +1,10 @@
 # Preliminary EDA Netlist Export - Subject to PCB DRC, ERC, and Layout Verification
 (export (version D) (design (source "AnalogFilterSynthesis") (tool "Analog-Filter-Synthesizer"))
   (components
-    (comp (ref R1) (value "3k Ohm") (footprint Resistor_SMD:R_0805_2012Metric))
-    (comp (ref R2) (value "1.8k Ohm") (footprint Resistor_SMD:R_0805_2012Metric))
-    (comp (ref C1) (value "100nF") (footprint Capacitor_SMD:C_0805_2012Metric))
-    (comp (ref C2) (value "47nF") (footprint Capacitor_SMD:C_0805_2012Metric))
+    (comp (ref R1) (value "97.6k Ohm") (footprint Resistor_SMD:R_0805_2012Metric))
+    (comp (ref R2) (value "52.3k Ohm") (footprint Resistor_SMD:R_0805_2012Metric))
+    (comp (ref C1) (value "3.3nF") (footprint Capacitor_SMD:C_0805_2012Metric))
+    (comp (ref C2) (value "1.5nF") (footprint Capacitor_SMD:C_0805_2012Metric))
     (comp (ref U1) (value "OPA1678") (footprint Package_SO:SOIC-8_3.9x4.9mm_P1.27mm) (description "Dual Low-Distortion Audio Op-Amp (SOIC-8, Section A active, Section B terminated)"))
     (comp (ref C_DEC1) (value "100nF") (footprint Capacitor_SMD:C_0805_2012Metric) (description "V+ Decoupling"))
     (comp (ref C_DEC2) (value "100nF") (footprint Capacitor_SMD:C_0805_2012Metric) (description "V- Decoupling"))
