@@ -1,6 +1,8 @@
-Item,RefDes,Value,Component Tolerance,Design / MC Tolerance,Rating,Package,Manufacturer,Manufacturer Part Number,Description,Datasheet / Reference,Est. Unit Cost (USD)
-1,R1,97.6k Ohm,+/-1.0%,+/-1.0%,0.125W 150V,0805 SMD,Yageo,RC0805FR-0797K6L,97.6k Ohm Thick Film Chip Resistor 0805 1/8W 150V +/-1%,https://www.yageo.com/upload/files/datasheet/smd/RC_L_2016_v4.pdf,$0.02
-2,R2,52.3k Ohm,+/-1.0%,+/-1.0%,0.125W 150V,0805 SMD,Yageo,RC0805FR-0752K3L,52.3k Ohm Thick Film Chip Resistor 0805 1/8W 150V +/-1%,https://www.yageo.com/upload/files/datasheet/smd/RC_L_2016_v4.pdf,$0.02
-3,C1,3.3nF,+/-5.0%,+/-5.0%,50V C0G,0805 SMD,Murata Electronics,GRM2165C1H332JA01D,3.3nF Multilayer Ceramic Capacitor 0805 50V C0G +/-5%,https://www.murata.com/en-global/products/productdetail?partno=GRM2165C1H332JA01%23,$0.08
-4,C2,1.5nF,+/-5.0%,+/-5.0%,100V C0G,0805 SMD,Murata Electronics,GRM2165C2A152JA01D,1.5nF Multilayer Ceramic Capacitor 0805 100V C0G +/-5%,https://www.murata.com/en-global/products/productdetail?partno=GRM2165C2A152JA01%23,$0.08
-5,U1,OPA1678,N/A,N/A,"4.5V to 36V, 16MHz GBW, 4.5nV/rtHz",SOIC-8,Texas Instruments,OPA1678IDR,SoundPlus Dual Low-Distortion Audio Operational Amplifier (SOIC-8),https://www.ti.com/lit/ds/symlink/opa1678.pdf,$0.85
+Item,RefDes,Value,Component Tolerance,Design / MC Tolerance,Rating,Package,Manufacturer,Manufacturer Part Number,Description,Datasheet / Reference,Verification Date,Lifecycle Status,Est. Unit Cost (USD)
+1,R1,3k Ohm,Generic - MPN not verified,+/-5.0%,1/8W 150V,0805 SMD,Generic,Generic - MPN not verified,3k Ohm Resistor (0805 SMD),N/A (Generic),N/A,Unverified,$0.02
+2,R2,1.8k Ohm,Generic - MPN not verified,+/-5.0%,1/8W 150V,0805 SMD,Generic,Generic - MPN not verified,1.8k Ohm Resistor (0805 SMD),N/A (Generic),N/A,Unverified,$0.02
+3,C1,100nF,Generic - MPN not verified,+/-5.0%,50V Ceramic,0805 SMD,Generic,Generic - MPN not verified,100nF Capacitor (0805 SMD),N/A (Generic),N/A,Unverified,$0.06
+4,C2,47nF,Generic - MPN not verified,+/-5.0%,50V Ceramic,0805 SMD,Generic,Generic - MPN not verified,47nF Capacitor (0805 SMD),N/A (Generic),N/A,Unverified,$0.06
+5,U1,OPA1678,N/A,N/A,"4.5V to 36V, 16MHz GBW, 4.5nV/rtHz",SOIC-8,Texas Instruments,OPA1678IDR,"SoundPlus Dual Low-Distortion Audio Operational Amplifier (SOIC-8, Dual Channel)",https://www.ti.com/lit/ds/symlink/opa1678.pdf,2026-11-14,Active,$0.85
+6,C_DEC1,100nF,+/-10.0%,+/-10.0%,50V X7R,0805 SMD,Murata Electronics,GRM21BR71H104KA01L,100nF 50V X7R Ceramic Decoupling Capacitor for V+ Supply Decoupling (Pin 8 to GND),https://www.murata.com/en-global/products/productdetail?partno=GRM21BR71H104KA01%23,2026-11-14,Active,$0.07
+7,C_DEC2,100nF,+/-10.0%,+/-10.0%,50V X7R,0805 SMD,Murata Electronics,GRM21BR71H104KA01L,100nF 50V X7R Ceramic Decoupling Capacitor for V- Supply Decoupling (Pin 4 to GND),https://www.murata.com/en-global/products/productdetail?partno=GRM21BR71H104KA01%23,2026-11-14,Active,$0.07

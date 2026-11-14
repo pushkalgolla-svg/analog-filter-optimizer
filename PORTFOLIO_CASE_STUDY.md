@@ -12,11 +12,12 @@
 **Analog Filter EDA Synthesizer & SPICE Studio**
 [Live Web Demo](https://pushkal-filter-studio.streamlit.app/) | [GitHub Repository](https://github.com/pushkalgolla-svg/analog-filter-optimizer)
 - Engineered an end-to-end EDA synthesis pipeline for active/passive analog filters (LPF, HPF, BPF, and 4th-order cascaded Butterworth biquads) achieving < 0.15% cutoff accuracy mapped to commercial EIA standard components (E12, E24, E96).
+- Integrated genuine Texas Instruments OPA167x PSpice macro-model (Rev E / SBOS855D) into ngspice with automated `.spiceinit` compatibility mode (`set ngbehavior=pslt`), with verified idealized VCVS fallback.
 - Implemented a continuous Nelder-Mead optimization algorithm operating in logarithmic parameter space ($log_{10} R, log_{10} C$), normalizing 12 orders of magnitude of component scale and preventing gradient explosion.
-- Built an automated SPICE co-simulation feedback loop using portable 64-bit ngspice in console batch mode with dynamic AC sweeps and automated -3dB cutoff and quality factor (Q) extraction.
-- Developed a 100-run Monte Carlo cutoff frequency compliance engine modeling Gaussian component tolerances (±1% R, ±5% C); achieved 100% compliance within ±5% spec band and 68% within ±2% spec band.
-- Generated production-grade Bill of Materials (BOM) strictly with verified manufacturer part numbers (Yageo, Murata, TI OPA1678) with active lifecycle checks and multi-unit IC physical package mapping (single dual-channel SOIC-8 for 4th-order cascade), along with KiCad 8 schematic netlists ready for PCB layout.
-- Deployed an interactive web studio (Streamlit) featuring live Bode plots, interactive tolerance tuning, yield scorecards, and netlist downloads.
+- Built an automated SPICE co-simulation feedback loop using portable 64-bit ngspice in console batch mode with dynamic AC sweeps, thread-safe ephemeral workspace isolation for multi-user concurrency, and automated -3dB cutoff and Q extraction.
+- Developed a 50-to-100-run Monte Carlo cutoff frequency compliance engine modeling Gaussian component tolerances (±1% R, ±5% C) with rigorous non-convergent trial exclusion and 95% statistical confidence intervals.
+- Generated production-grade Bill of Materials (BOM) strictly with verified manufacturer part numbers (Yageo, Murata, TI OPA1678) with active lifecycle checks, dual-rail power supplies with 100nF decoupling, TI SLOA067 unused-channel termination, and multi-unit IC physical package mapping.
+- Validated system reliability across 61 automated tests (50 unit tests + 11 SPICE integration tests) and deployed an interactive Streamlit web studio.
 ```
 
 ---
@@ -106,6 +107,22 @@ flowchart TD
 - **Nelder-Mead Simplex Numerical Path**: Applied to 1st-order RC, 2nd-order Sallen-Key LPF, 2nd-order Sallen-Key HPF, and 2nd-order MFB BPF. The solver dynamically navigates component interaction landscapes in $\log_{10}$ space with full failure validation (checking convergence flag, rejecting non-finite/sentinel objectives, and confirming strictly positive values).
 - **Analytical Closed-Form Sizing Path**: Applied to 4th-order Cascaded Sallen-Key LPF. Because a 4th-order Butterworth response requires exact biquad stage pole damping ($Q_1=0.5412$ and $Q_2=1.3065$), multi-variable iterative search can encounter local minima that distort pole separation. We use exact algebraic polynomial factorization to size stage parameters in closed form, followed by coupled commercial snapping and SPICE verification.
 
+### 5. Genuine Op-Amp Macro-Modeling & Ngspice Compatibility
+- **Problem**: Idealized voltage-controlled voltage sources (VCVS) assume infinite bandwidth, infinite open-loop gain, and zero output impedance, obscuring real op-amp non-idealities (gain-bandwidth product limits, input capacitance, phase margin degradation). However, commercial vendor macro-models (such as Texas Instruments OPA167x PSpice library) use syntax constructs (`VSWITCH`, `IF`) that trigger parse errors in standard Berkeley SPICE engines.
+- **Solution**: The engine integrates Texas Instruments' official OPA167x macro-model (Rev E / SBOS855D). To achieve complete compatibility without modifying pristine vendor code, the execution runner generates an ephemeral execution directory `.spiceinit` containing `set ngbehavior=pslt` and `set noaskquit`. This configures ngspice in PSpice/LTspice mixed-mode compatibility, allowing native parsing of complex vendor subcircuits.
+
+### 6. Production PCB Netlist Power Architecture & Termination
+- **Problem**: Amateur EDA tools often leave op-amp power pins floating or tie negative supply pins directly to ground in single-ended simulations, resulting in severe simulation artifacts and DRC/ERC failures in KiCad PCB layouts. Furthermore, leaving unused channels of dual op-amps floating causes high-frequency oscillations and excessive thermal dissipation.
+- **Solution**:
+  - The KiCad netlist exporter strictly adheres to the physical OPA1678 SOIC-8 pinout: Pin 1 (OUT A), Pin 2 (-IN A), Pin 3 (+IN A), Pin 4 (V-), Pin 5 (+IN B), Pin 6 (-IN B), Pin 7 (OUT B), Pin 8 (V+).
+  - Supplies are arranged as a configurable $\pm 15\text{ V}$ dual rail with dedicated $100\text{ nF}$ 50V X7R ceramic decoupling capacitors (`C_DEC1` on Pin 8, `C_DEC2` on Pin 4) tied to GND.
+  - In single-stage 2nd-order filters, unused Section B is properly terminated according to TI Application Report SLOA067: non-inverting input (Pin 5) is tied to GND, and inverting input (Pin 6) is shorted to output (Pin 7).
+  - In 4th-order cascaded filters, both active stages are mapped to Sections A and B of a single physical dual-channel SOIC-8 IC package (`U1`).
+
+### 7. Thread-Safe Concurrency & Ephemeral Workspace Isolation
+- **Problem**: Web applications like Streamlit serve multiple concurrent users. If simulation scripts read or write shared static files (e.g., `src/current_sim.cir` or `output/sim_data.txt`), concurrent requests collide, overwrite each other's data, and produce race conditions.
+- **Solution**: Every synthesis and Monte Carlo simulation executes within a unique isolated temporary directory (`tempfile.TemporaryDirectory`). All intermediate netlists, local configuration files (`.spiceinit`), and raw frequency sweep data are written and read within this isolated workspace and automatically cleaned up upon completion.
+
 ---
 
 ## 5. Technical Interview Questions & Model Answers
@@ -122,6 +139,12 @@ flowchart TD
 ### Q4: How did you interface Python with SPICE on Windows without GUI blocking?
 > **Answer**: On Windows, `ngspice.exe` is compiled as a GUI subsystem application (`WinMain`), causing standard I/O pipes to block indefinitely. We specifically detected and invoked `ngspice_con.exe` (console subsystem) in batch mode (`-b`), writing standardized `wrdata` ASCII frequency sweep exports and parsing them with vectorized NumPy routines.
 
+### Q5: How did you run manufacturer PSpice macro-models in open-source ngspice?
+> **Answer**: Vendor PSpice models contain non-standard syntax like `VSWITCH` and conditional expressions (`IF(...)`). Instead of modifying pristine vendor models—which invalidates manufacturer provenance—we configured ngspice's syntax preprocessor by injecting an ephemeral `.spiceinit` file with `set ngbehavior=pslt` inside the simulation working directory. This enables PSpice/LTspice compatibility mode, allowing pristine vendor models to run directly in ngspice.
+
+### Q6: How do you handle race conditions when deploying a local SPICE simulator behind a multi-user web UI?
+> **Answer**: Rather than relying on static file paths like `current_sim.cir`, the simulator wraps every synthesis and Monte Carlo execution in a thread-safe `tempfile.TemporaryDirectory()`. The engine sets `cwd` to this isolated workspace, writes local netlists and output files with relative paths, executes the simulation process with strict timeouts, parses results into memory, and cleans up the temporary directory on exit.
+
 ---
 
 ## 6. How to Run & Verify
@@ -131,8 +154,9 @@ flowchart TD
 cd C:\Users\91900\.gemini\antigravity\scratch\analog_filter_synthesis
 .\.venv\Scripts\Activate.ps1
 
-# 2. Run the 11-Check Automated Test Suite
-python scripts/test_pipeline.py
+# 2. Run Automated Regression Test Suites
+python -m unittest tests/test_unit.py             # 50 unit tests
+python -m unittest tests/test_integration_spice.py # 11 SPICE integration tests
 
 # 3. Synthesize Topologies via CLI
 python scripts/synthesize.py --type lpf --order 2 --target-fc 1000 --series E96 --monte-carlo

@@ -27,6 +27,19 @@ An end-to-end analog active and passive filter synthesis engine powered by conti
   - Full optimizer validation: checks convergence status (`res.success`, `res.message`), rejects non-finite objective values, rejects failure sentinel objectives ($10^{12}$), and validates positive physical component values before SPICE verification.
 - **Coupled Commercial Snapping**:
   - Discrete coupled grid search pairing standard E12/E24 capacitors with closest standard E96 resistors to maintain $< 0.15\%$ cutoff error.
+- **High-Accuracy Op-Amp Simulation Models**:
+  - **Texas Instruments OPA167x PSpice Macro-Model (Rev E / SBOS855D)**: Integrated natively into `ngspice` using isolated directory `.spiceinit` with `set ngbehavior=pslt` compatibility mode without altering pristine vendor source code.
+  - **Idealized VCVS Fallback**: High-gain voltage-controlled voltage source ($A_{OL} = 100,000$) explicitly retained and labeled as an idealized benchmark.
+  - **Model Provenance**: Pristine vendor model preserved in `src/models/OPA167x.LIB` with recorded SHA-256 integrity checksum (`a4a2f63b714c799bd4ccbf52fa71922d2786f93fcdfcc10f0b11377194beef77`) and full provenance tracking.
+- **Production KiCad 8 Netlist & Power Architecture**:
+  - **True Dual-Rail Supplies**: Configurable $\pm 15\text{ V}$ dual supply architecture matching OPA1678 recommended operating conditions ($4.5\text{ V}$ to $36\text{ V}$).
+  - **Accurate SOIC-8 Pin Mapping**: Pin 1 (OUT A), Pin 2 (-IN A), Pin 3 (+IN A), Pin 4 (V-), Pin 5 (+IN B), Pin 6 (-IN B), Pin 7 (OUT B), Pin 8 (V+). Pin 4 connects strictly to V- and is never grounded.
+  - **Power Decoupling Provisions**: Dedicated $100\text{ nF}$ 50V X7R ceramic capacitors (`C_DEC1` on V+, `C_DEC2` on V-) included in both KiCad netlists and production BOMs.
+  - **Unused Section B Termination**: Single-stage 2nd-order filters terminate unused Channel B per Texas Instruments Application Report SLOA067 (Pin 5 tied to GND, Pins 6-7 shorted to prevent oscillation and excess supply current).
+  - **Multi-Unit Package Mapping**: 4th-order cascaded filters accurately map both stages to Sections A and B of a single physical dual-channel OPA1678 (`U1`, SOIC-8).
+- **Concurrent Simulation Engine & Robust Monte Carlo**:
+  - **Thread-Safe Workspace Isolation**: Every synthesis and Monte Carlo simulation executes within an ephemeral temporary directory (`tempfile.TemporaryDirectory`), completely eliminating race conditions and file collisions (`current_sim.cir`, `sim_data.txt`) under multi-user concurrency.
+  - **Non-Convergent Trial Tracking**: Robust `MonteCarloResult` separates valid converged measurements from failed/non-convergent trials, calculating statistics and yield strictly over valid trials and flagging yield completion when non-convergent runs occur.
 - **Statistical Monte Carlo Sensitivity & Compliance Analysis**:
   - $N$-trial batch SPICE simulation modeling component manufacturing tolerances (Gaussian distribution with $3\sigma = \text{tolerance}$).
   - Computes sample mean ($\mu$), sample standard deviation ($s$), Mean 95% Confidence Interval ($\mu \pm 1.96 \cdot s/\sqrt{N}$), Approximate 95% Distribution Band ($\mu \pm 1.96s$), and Empirical 95% Percentile Interval ($[P_{2.5}, P_{97.5}]$).
@@ -111,8 +124,16 @@ Open `http://localhost:8501` in your browser to interactively select filter topo
 
 ---
 
-### 3. Run Automated Regression Test Suite
+### 3. Run Automated Regression Test Suites
+
+#### Full Unit Test Suite (50 Automated Tests):
 ```powershell
-.\.venv\Scripts\python.exe scripts/test_pipeline.py
+.\.venv\Scripts\python.exe -m unittest tests/test_unit.py
 ```
-All **11/11 automated checks** will run in isolation and verify SPICE detection, netlist generation, frequency parsing, E-series snapping, and multi-topology performance.
+Validates optimizer convergence, failure handling, tolerance matching, active BOM lifecycle status, KiCad power net assertions, workspace isolation, and Streamlit dashboard rendering.
+
+#### Full SPICE Integration Test Suite (11 Integration Tests):
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests/test_integration_spice.py
+```
+Executes genuine `ngspice` simulations across all five filter topologies with both the official Texas Instruments OPA167x macro-model and idealized VCVS, confirming convergence, frequency accuracy, and thread-safe concurrent simulation.

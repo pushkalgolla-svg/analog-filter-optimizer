@@ -1,17 +1,37 @@
-* Parameterized First-Order RC Low-Pass Filter Template
-* Vin is an independent AC voltage source (1V AC, 0 phase)
+* Parameterized 2nd-Order Active Sallen-Key Low-Pass Filter
+* Active Amplifier Mode: Texas Instruments OPA1678 Macro-Model (Rev E / SBOS855D)
+.include "OPA167x.LIB"
+
+* Independent AC Input Voltage Source
 Vin in 0 ac 1.0
 
-* Low-Pass Filter components with parameterized values
-R1 in out 1.59515720e+04
-C1 out 0 9.76461605e-09
+* Power Supply Rails and Decoupling Network
+* Dual Power Supply Rails (+/-15.0V)
+Vcc vcc 0 dc 15.0
+Vee vee 0 dc -15.0
+* Power Supply Decoupling Capacitors (100nF Ceramic to GND)
+Cdec1 vcc 0 100n
+Cdec2 vee 0 100n
+
+* Sallen-Key 2nd-Order Low-Pass Filter Network
+R1 in n1 2.95580713e+03
+R2 n1 inp 1.80461175e+03
+C1 n1 out 1.00097015e-07
+C2 inp 0 4.61046733e-08
+
+* Operational Amplifier Subsystem
+* Operational Amplifier Subsystem (Dual OPA1678 SOIC-8)
+* Active Section A: Sallen-Key Low-Pass Buffer (Pins 1, 2, 3, 4, 8)
+XU1A inp out vcc vee out OPA167x
+* Terminated Unused Section B per TI SLOA067 (Pins 5, 6, 7)
+XU1B 0 out_b vcc vee out_b OPA167x
 
 * Control block for AC frequency sweep and automated data export
 .control
 set wr_singlescale
-ac dec 100 10 100k
+ac dec 100 10.00 100000.00
 let vdb_out = db(v(out))
-wrdata output/sim_data.txt vdb_out
+wrdata sim_out_227c3664.txt vdb_out
 quit
 .endc
 .end

@@ -27,6 +27,9 @@ from synthesize import (
     find_commercial_cascade4,
     run_monte_carlo_analysis,
     synthesize_filter,
+    OPAMP_MODEL_TI,
+    OPAMP_MODEL_IDEAL,
+    DEFAULT_V_SUPPLY,
     TARGET_CUTOFF_HZ,
     BUTTERWORTH_Q,
 )
@@ -194,6 +197,82 @@ class TestSpiceIntegration(unittest.TestCase):
         self.assertLess(res["pct_err_comm"], 1.5)
         self.assertTrue(res["bom_csv_path"].exists())
         self.assertTrue(res["kicad_net_path"].exists())
+
+
+    def test_ti_opa1678_macro_model_spice_execution(self):
+        """Official TI OPA1678 macro-model executes cleanly in ngspice with dual-rail +/-15V supply."""
+        test_out = self.test_dir / "test_ti_opa1678.txt"
+        self.created_files.append(test_out)
+
+        params_sk = [14700.0, 7870.0, 22.0e-9, 10.0e-9]
+        run_spice_simulation(
+            params_sk, order=2, filter_type="lpf",
+            ngspice_bin=NGSPICE_BIN, fallback=False, output_data_file=test_out,
+            opamp_model=OPAMP_MODEL_TI, v_supply=15.0
+        )
+        self.assertTrue(test_out.exists())
+        freqs, mags = parse_simulation_data(test_out)
+        self.assertEqual(len(freqs), 401)
+        fc = extract_cutoff_frequency(freqs, mags, filter_type="lpf")
+        self.assertLess(abs(fc - 1000.0), 10.0)
+
+    def test_idealized_vs_ti_model_frequency_response(self):
+        """Compare idealized VCVS vs TI OPA1678 macro-model responses: both achieve cutoff, macro-model adds real op-amp response."""
+        out_ideal = self.test_dir / "test_out_ideal.txt"
+        out_ti = self.test_dir / "test_out_ti.txt"
+        self.created_files.extend([out_ideal, out_ti])
+
+        params_sk = [14700.0, 7870.0, 22.0e-9, 10.0e-9]
+        run_spice_simulation(
+            params_sk, order=2, filter_type="lpf",
+            ngspice_bin=NGSPICE_BIN, fallback=False, output_data_file=out_ideal,
+            opamp_model=OPAMP_MODEL_IDEAL
+        )
+        run_spice_simulation(
+            params_sk, order=2, filter_type="lpf",
+            ngspice_bin=NGSPICE_BIN, fallback=False, output_data_file=out_ti,
+            opamp_model=OPAMP_MODEL_TI, v_supply=15.0
+        )
+
+        fc_ideal = extract_cutoff_frequency(*parse_simulation_data(out_ideal), filter_type="lpf")
+        fc_ti = extract_cutoff_frequency(*parse_simulation_data(out_ti), filter_type="lpf")
+
+        self.assertLess(abs(fc_ideal - 1000.0), 10.0)
+        self.assertLess(abs(fc_ti - 1000.0), 10.0)
+        # Macro-model and idealized are in close agreement at audio frequencies (< 1 Hz difference)
+        self.assertLess(abs(fc_ideal - fc_ti), 2.0)
+
+    def test_concurrent_spice_simulations(self):
+        """Concurrent ngspice simulations in separate threads run without intermediate file collision."""
+        import concurrent.futures
+
+        out1 = self.test_dir / "test_conc_1.txt"
+        out2 = self.test_dir / "test_conc_2.txt"
+        self.created_files.extend([out1, out2])
+
+        def sim1():
+            run_spice_simulation([10000.0, 10e-9], order=1, filter_type="lpf",
+                                 ngspice_bin=NGSPICE_BIN, output_data_file=out1)
+            return parse_simulation_data(out1)
+
+        def sim2():
+            run_spice_simulation([14700.0, 7870.0, 22e-9, 10e-9], order=2, filter_type="lpf",
+                                 ngspice_bin=NGSPICE_BIN, output_data_file=out2,
+                                 opamp_model=OPAMP_MODEL_TI, v_supply=15.0)
+            return parse_simulation_data(out2)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            f1 = ex.submit(sim1)
+            f2 = ex.submit(sim2)
+            f1.result()
+            f2.result()
+
+        self.assertTrue(out1.exists())
+        self.assertTrue(out2.exists())
+        fc1 = extract_cutoff_frequency(*parse_simulation_data(out1), filter_type="lpf")
+        fc2 = extract_cutoff_frequency(*parse_simulation_data(out2), filter_type="lpf")
+        self.assertAlmostEqual(fc1, 1591.6, delta=5.0)
+        self.assertAlmostEqual(fc2, 997.0, delta=10.0)
 
 
 if __name__ == "__main__":

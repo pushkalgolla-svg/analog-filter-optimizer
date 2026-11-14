@@ -33,7 +33,13 @@ from synthesize import (
     find_commercial_bpf,
     find_commercial_cascade4,
     run_spice_simulation,
+    run_monte_carlo_analysis,
+    build_spice_netlist,
     loss_function,
+    MonteCarloResult,
+    OPAMP_MODEL_TI,
+    OPAMP_MODEL_IDEAL,
+    DEFAULT_V_SUPPLY,
     E_SERIES,
     TARGET_CUTOFF_HZ,
     BUTTERWORTH_Q,
@@ -219,6 +225,9 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
             elif row["RefDes"].startswith("R"):
                 self.assertEqual(row["Component Tolerance"], "+/-1.0%")
                 self.assertEqual(row["Design / MC Tolerance"], "+/-1.0%")
+            elif row["RefDes"] in ["C_DEC1", "C_DEC2"]:
+                self.assertEqual(row["Component Tolerance"], "+/-10.0%")
+                self.assertEqual(row["Design / MC Tolerance"], "+/-10.0%")
             elif row["RefDes"].startswith("C"):
                 self.assertEqual(row["Component Tolerance"], "+/-5.0%")
                 self.assertEqual(row["Design / MC Tolerance"], "+/-5.0%")
@@ -245,10 +254,11 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
         self.assertEqual(part["ref"], "N/A (Generic)")
 
     def test_bom_csv_generation_and_schema(self):
-        """Generate BOM data and verify CSV export schema and parseability."""
+        """Generate BOM data and verify CSV export schema, metadata columns, and parseability."""
         comp_dict = {"R1": 10000.0, "R2": 22000.0, "C1": 10.0e-9, "C2": 4.7e-9}
         bom_rows = generate_bom_data("sallen_key_lpf", comp_dict, r_tol=1.0, c_tol=5.0)
-        self.assertEqual(len(bom_rows), 5)  # 2 resistors + 2 caps + 1 op-amp
+        # 4 passives + 1 dual op-amp (U1) + 2 decoupling capacitors (C_DEC1, C_DEC2) = 7 total rows
+        self.assertEqual(len(bom_rows), 7)
 
         out_csv = PROJECT_ROOT / "output" / "test_unit_bom.csv"
         export_bom_csv(bom_rows, out_csv)
@@ -260,11 +270,17 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
             expected_fields = [
                 "Item", "RefDes", "Value", "Component Tolerance", "Design / MC Tolerance", "Rating",
                 "Package", "Manufacturer", "Manufacturer Part Number",
-                "Description", "Datasheet / Reference", "Est. Unit Cost (USD)"
+                "Description", "Datasheet / Reference", "Verification Date", "Lifecycle Status", "Est. Unit Cost (USD)"
             ]
             self.assertEqual(reader.fieldnames, expected_fields)
             rows = list(reader)
-            self.assertEqual(len(rows), 5)
+            self.assertEqual(len(rows), 7)
+            # Verify decoupling capacitor entries
+            dec_rows = [r for r in rows if r["RefDes"] in ["C_DEC1", "C_DEC2"]]
+            self.assertEqual(len(dec_rows), 2)
+            self.assertEqual(dec_rows[0]["Manufacturer Part Number"], "GRM21BR71H104KA01L")
+            self.assertEqual(dec_rows[0]["Verification Date"], "2026-11-14")
+            self.assertEqual(dec_rows[0]["Lifecycle Status"], "Active")
 
         if out_csv.exists():
             out_csv.unlink()
@@ -309,14 +325,14 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
         self.assertEqual(part_tight["mpn"], "Generic - MPN not verified")
 
     def test_fourth_order_cascade_bom_counts_one_physical_ic_package(self):
-        """4th-order cascaded LPF BOM counts exactly 1 physical OPA1678 dual-channel IC package (RefDes: U1)."""
+        """4th-order cascaded LPF BOM counts exactly 1 physical OPA1678 dual-channel IC package (RefDes: U1) and decoupling."""
         c4_comps = {
             "R1_1": 14700.0, "R2_1": 14700.0, "C1_1": 1.2e-8, "C2_1": 1.0e-8,
             "R1_2": 12700.0, "R2_2": 12700.0, "C1_2": 3.3e-8, "C2_2": 4.7e-9
         }
         bom = generate_bom_data("cascade4_lpf", c4_comps, r_tol=1.0, c_tol=5.0)
-        # 8 passive components + 1 physical dual op-amp IC = 9 total rows
-        self.assertEqual(len(bom), 9)
+        # 8 passive components + 1 physical dual op-amp IC + 2 decoupling capacitors = 11 total rows
+        self.assertEqual(len(bom), 11)
 
         opamp_rows = [r for r in bom if r["Value"] == "OPA1678"]
         self.assertEqual(len(opamp_rows), 1)
@@ -324,6 +340,8 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
         self.assertEqual(opamp_rows[0]["Manufacturer Part Number"], "OPA1678IDR")
         self.assertEqual(opamp_rows[0]["Package"], "SOIC-8")
         self.assertIn("Dual Channel - Sections A & B", opamp_rows[0]["Description"])
+        self.assertEqual(opamp_rows[0]["Verification Date"], "2026-11-14")
+        self.assertEqual(opamp_rows[0]["Lifecycle Status"], "Active")
 
     def test_both_amplifier_sections_represented_in_kicad_netlist(self):
         """4th-order cascade KiCad netlist maps Stage 1 to Section A and Stage 2 to Section B of physical package U1."""
@@ -349,34 +367,41 @@ class TestBOMManufacturingCatalog(unittest.TestCase):
         self.assertIn('(node (ref U1) (pin 7))', net_str)  # Stage 2 OUT
         self.assertIn('(node (ref U1) (pin 6))', net_str)  # Stage 2 -IN
 
-        # Verify ground connection (pin 4)
-        self.assertIn('(node (ref U1) (pin 4))', net_str)
+        # Verify power connections: Pin 8 to V+, Pin 4 to V-
+        self.assertIn('(net (code 8) (name "V+") (node (ref U1) (pin 8)) (node (ref C_DEC1) (pin 1)))', net_str)
+        self.assertIn('(net (code 9) (name "V-") (node (ref U1) (pin 4)) (node (ref C_DEC2) (pin 1)))', net_str)
+
+        # Critical: Pin 4 and Pin 8 must NEVER be connected to GND
+        gnd_net_lines = [line for line in net_str.splitlines() if '(name "GND")' in line]
+        self.assertEqual(len(gnd_net_lines), 1)
+        self.assertNotIn('(node (ref U1) (pin 4))', gnd_net_lines[0])
+        self.assertNotIn('(node (ref U1) (pin 8))', gnd_net_lines[0])
 
         if out_net.exists():
             out_net.unlink()
 
     def test_other_filter_topologies_retain_correct_ic_counts(self):
-        """Other filter topologies retain correct IC counts (0 for 1st-order, 1 for 2nd-order)."""
-        # 1st-order RC: 0 op-amps
+        """Other filter topologies retain correct IC counts (0 for 1st-order, 1 for 2nd-order, with decoupling)."""
+        # 1st-order RC: 0 op-amps, 0 decoupling caps = 2 rows
         bom_1st = generate_bom_data("1st_order_rc", {"R1": 16000.0, "C1": 1.0e-8})
         self.assertEqual(len(bom_1st), 2)
         self.assertEqual(len([r for r in bom_1st if r["Value"] == "OPA1678"]), 0)
 
-        # 2nd-order Sallen-Key LPF: 1 op-amp
+        # 2nd-order Sallen-Key LPF: 4 passives + 1 op-amp + 2 decoupling caps = 7 rows
         bom_sk_lpf = generate_bom_data("sallen_key_lpf", {"R1": 10000.0, "R2": 22000.0, "C1": 10.0e-9, "C2": 4.7e-9})
-        self.assertEqual(len(bom_sk_lpf), 5)
+        self.assertEqual(len(bom_sk_lpf), 7)
         self.assertEqual(len([r for r in bom_sk_lpf if r["Value"] == "OPA1678"]), 1)
         self.assertEqual([r for r in bom_sk_lpf if r["Value"] == "OPA1678"][0]["RefDes"], "U1")
 
-        # 2nd-order Sallen-Key HPF: 1 op-amp
+        # 2nd-order Sallen-Key HPF: 4 passives + 1 op-amp + 2 decoupling caps = 7 rows
         bom_sk_hpf = generate_bom_data("sallen_key_hpf", {"R1": 75000.0, "R2": 150000.0, "C1": 1.5e-9, "C2": 1.5e-9})
-        self.assertEqual(len(bom_sk_hpf), 5)
+        self.assertEqual(len(bom_sk_hpf), 7)
         self.assertEqual(len([r for r in bom_sk_hpf if r["Value"] == "OPA1678"]), 1)
         self.assertEqual([r for r in bom_sk_hpf if r["Value"] == "OPA1678"][0]["RefDes"], "U1")
 
-        # 2nd-order MFB BPF: 1 op-amp
+        # 2nd-order MFB BPF: 5 passives + 1 op-amp + 2 decoupling caps = 8 rows
         bom_bpf = generate_bom_data("mfb_bpf", {"R1": 31600.0, "R2": 4530.0, "R3": 63400.0, "C1": 1.0e-8, "C2": 1.0e-8})
-        self.assertEqual(len(bom_bpf), 6)
+        self.assertEqual(len(bom_bpf), 8)
         self.assertEqual(len([r for r in bom_bpf if r["Value"] == "OPA1678"]), 1)
         self.assertEqual([r for r in bom_bpf if r["Value"] == "OPA1678"][0]["RefDes"], "U1")
 
@@ -705,6 +730,283 @@ class TestStreamlitDashboard(unittest.TestCase):
         self.assertEqual(len(at.error), 0, f"Unexpected app errors: {at.error}")
         self.assertEqual(len(at.metric), 5)
         self.assertEqual(len(at.dataframe), 2)
+
+
+
+class TestPowerConnectionsAndKiCadValidation(unittest.TestCase):
+    """
+    Automated regression tests validating pin assignments, dual-rail power nets,
+    decoupling provisions, and unused op-amp channel terminations across all 5 filter topologies.
+    """
+
+    def test_all_five_topologies_kicad_pinouts_and_supplies(self):
+        """Validates all five filter topologies export valid KiCad nets with correct pin mappings and supplies."""
+        topologies = [
+            ("1st_order_rc", {"R1": 10000.0, "C1": 10e-9}),
+            ("sallen_key_lpf", {"R1": 10000.0, "R2": 22000.0, "C1": 10e-9, "C2": 4.7e-9}),
+            ("sallen_key_hpf", {"R1": 75000.0, "R2": 150000.0, "C1": 1.5e-9, "C2": 1.5e-9}),
+            ("mfb_bpf", {"R1": 31600.0, "R2": 4530.0, "R3": 63400.0, "C1": 10e-9, "C2": 10e-9}),
+            ("cascade4_lpf", {
+                "R1_1": 14700.0, "R2_1": 14700.0, "C1_1": 1.2e-8, "C2_1": 1.0e-8,
+                "R1_2": 12700.0, "R2_2": 12700.0, "C1_2": 3.3e-8, "C2_2": 4.7e-9
+            }),
+        ]
+
+        for top_key, comps in topologies:
+            with self.subTest(topology=top_key):
+                out_path = PROJECT_ROOT / "output" / f"test_kicad_{top_key}.net"
+                net_text = export_kicad_netlist(top_key, comps, out_path)
+                self.assertTrue(out_path.exists())
+
+                # Preliminary EDA disclaimer check
+                self.assertIn("Preliminary EDA Netlist Export", net_text)
+
+                if top_key == "1st_order_rc":
+                    # Passive circuit has no U1 and no decoupling
+                    self.assertNotIn("(ref U1)", net_text)
+                    self.assertNotIn("(ref C_DEC1)", net_text)
+                    self.assertNotIn("(ref C_DEC2)", net_text)
+                    self.assertIn('(name "IN")', net_text)
+                    self.assertIn('(name "OUT")', net_text)
+                    self.assertIn('(name "GND")', net_text)
+                else:
+                    # Active circuits MUST contain U1 and decoupling caps C_DEC1, C_DEC2
+                    self.assertIn('(comp (ref U1) (value "OPA1678")', net_text)
+                    self.assertIn('(comp (ref C_DEC1) (value "100nF")', net_text)
+                    self.assertIn('(comp (ref C_DEC2) (value "100nF")', net_text)
+
+                    # Supply nets MUST connect Pin 8 to V+ and Pin 4 to V-
+                    self.assertIn('(name "V+")', net_text)
+                    self.assertIn('(node (ref U1) (pin 8))', net_text)
+                    self.assertIn('(node (ref C_DEC1) (pin 1))', net_text)
+
+                    self.assertIn('(name "V-")', net_text)
+                    self.assertIn('(node (ref U1) (pin 4))', net_text)
+                    self.assertIn('(node (ref C_DEC2) (pin 1))', net_text)
+
+                    # Ground net MUST connect decoupling capacitor pin 2s
+                    self.assertIn('(node (ref C_DEC1) (pin 2))', net_text)
+                    self.assertIn('(node (ref C_DEC2) (pin 2))', net_text)
+
+                    # CRITICAL: Pin 4 (V-) and Pin 8 (V+) must NEVER be in GND net!
+                    gnd_line = [l for l in net_text.splitlines() if '(name "GND")' in l][0]
+                    self.assertNotIn('(node (ref U1) (pin 4))', gnd_line,
+                                     f"Pin 4 (V-) must not be connected to GND in {top_key}")
+                    self.assertNotIn('(node (ref U1) (pin 8))', gnd_line,
+                                     f"Pin 8 (V+) must not be connected to GND in {top_key}")
+
+                    if top_key in ["sallen_key_lpf", "sallen_key_hpf", "mfb_bpf"]:
+                        # 2nd-order single stage: Section B terminated per TI SLOA067
+                        # Pin 5 (IN+ B) tied to GND
+                        self.assertIn('(node (ref U1) (pin 5))', gnd_line)
+                        # Pin 6 (IN- B) tied to Pin 7 (OUT B) in UNUSED_B net
+                        unused_b_line = [l for l in net_text.splitlines() if '(name "UNUSED_B")' in l][0]
+                        self.assertIn('(node (ref U1) (pin 6))', unused_b_line)
+                        self.assertIn('(node (ref U1) (pin 7))', unused_b_line)
+                    elif top_key == "cascade4_lpf":
+                        # 4th-order cascade: both Section A and Section B are active
+                        self.assertNotIn('(name "UNUSED_B")', net_text)
+                        self.assertIn('(node (ref U1) (pin 1))', net_text)  # Stage 1 OUT
+                        self.assertIn('(node (ref U1) (pin 2))', net_text)  # Stage 1 IN-
+                        self.assertIn('(node (ref U1) (pin 3))', net_text)  # Stage 1 IN+
+                        self.assertIn('(node (ref U1) (pin 5))', net_text)  # Stage 2 IN+
+                        self.assertIn('(node (ref U1) (pin 6))', net_text)  # Stage 2 IN-
+                        self.assertIn('(node (ref U1) (pin 7))', net_text)  # Stage 2 OUT
+
+                if out_path.exists():
+                    out_path.unlink()
+
+    def test_regression_fails_when_power_pins_are_missing_or_grounded(self):
+        """Explicit regression: verifies that a malformed netlist with grounded pin 4 or missing pin 8 fails validation."""
+        def validate_active_netlist(netlist_string):
+            # Split into individual net blocks
+            net_blocks = [blk for blk in netlist_string.split("(net ") if blk.strip()]
+            vplus_blocks = [b for b in net_blocks if '(name "V+")' in b]
+            vminus_blocks = [b for b in net_blocks if '(name "V-")' in b]
+            gnd_blocks = [b for b in net_blocks if '(name "GND")' in b]
+
+            if gnd_blocks and '(node (ref U1) (pin 4))' in gnd_blocks[0]:
+                raise AssertionError("Netlist validation failed: Pin 4 (V-) is illegally connected to GND.")
+            if not vplus_blocks or '(node (ref U1) (pin 8))' not in vplus_blocks[0]:
+                raise AssertionError("Netlist validation failed: Pin 8 (V+) is missing or unconnected.")
+            if not vminus_blocks or '(node (ref U1) (pin 4))' not in vminus_blocks[0]:
+                raise AssertionError("Netlist validation failed: Pin 4 (V-) is missing or unconnected.")
+            return True
+
+        # Valid netlist passes
+        valid_net = export_kicad_netlist("sallen_key_lpf", {"R1": 10000.0, "R2": 22000.0, "C1": 10e-9, "C2": 4.7e-9},
+                                          PROJECT_ROOT / "output" / "temp_val.net")
+        self.assertTrue(validate_active_netlist(valid_net))
+        (PROJECT_ROOT / "output" / "temp_val.net").unlink(missing_ok=True)
+
+        # Grounded Pin 4 fails
+        bad_grounded_pin4 = '(export (version D) (nets (net (name "GND") (node (ref U1) (pin 4))) (net (name "V+") (node (ref U1) (pin 8)))))'
+        with self.assertRaises(AssertionError) as ctx:
+            validate_active_netlist(bad_grounded_pin4)
+        self.assertIn("illegally connected to GND", str(ctx.exception))
+
+        # Missing Pin 8 fails
+        bad_missing_pin8 = '(export (version D) (nets (net (name "GND") (node (ref C1) (pin 2))) (net (name "V-") (node (ref U1) (pin 4)))))'
+        with self.assertRaises(AssertionError) as ctx:
+            validate_active_netlist(bad_missing_pin8)
+        self.assertIn("Pin 8 (V+) is missing", str(ctx.exception))
+
+
+class TestConcurrencyAndWorkspaceIsolation(unittest.TestCase):
+    """
+    Automated regression tests ensuring concurrent synthesis / simulation executions
+    run in isolated workspaces without cross-contaminating files or results.
+    """
+
+    def test_concurrent_synthesis_requests_do_not_contaminate_each_other(self):
+        """Simultaneous synthesis runs on separate threads with different specs complete independently without collision."""
+        import concurrent.futures
+
+        def run_task(task_id, f_type, order, target_f, series):
+            return task_id, synthesize_filter(
+                filter_type=f_type,
+                order=order,
+                target_fc=target_f,
+                r_series=series,
+                fallback=True
+            )
+
+        tasks = [
+            ("task_lpf_500", "lpf", 2, 500.0, "E96"),
+            ("task_hpf_2000", "hpf", 2, 2000.0, "E24"),
+            ("task_bpf_5000", "bpf", 2, 5000.0, "E96"),
+        ]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            futures = [executor.submit(run_task, *t) for t in tasks]
+            results = dict([f.result() for f in concurrent.futures.as_completed(futures)])
+
+        # Verify task 1 (LPF 500 Hz)
+        res_lpf = results["task_lpf_500"]
+        self.assertTrue(res_lpf["success"])
+        self.assertEqual(res_lpf["filter_type"], "lpf")
+        self.assertAlmostEqual(res_lpf["target_fc"], 500.0, places=1)
+        self.assertLess(abs(res_lpf["final_fc_comm"] - 500.0), 20.0)
+
+        # Verify task 2 (HPF 2000 Hz)
+        res_hpf = results["task_hpf_2000"]
+        self.assertTrue(res_hpf["success"])
+        self.assertEqual(res_hpf["filter_type"], "hpf")
+        self.assertAlmostEqual(res_hpf["target_fc"], 2000.0, places=1)
+        self.assertLess(abs(res_hpf["final_fc_comm"] - 2000.0), 60.0)
+
+        # Verify task 3 (BPF 5000 Hz)
+        res_bpf = results["task_bpf_5000"]
+        self.assertTrue(res_bpf["success"])
+        self.assertEqual(res_bpf["filter_type"], "bpf")
+        self.assertAlmostEqual(res_bpf["target_fc"], 5000.0, places=1)
+        self.assertLess(abs(res_bpf["final_fc_comm"] - 5000.0), 150.0)
+
+
+class TestMonteCarloFailureHandling(unittest.TestCase):
+    """
+    Automated regression tests for Monte Carlo failure tracking, statistical exclusion
+    of failed trials, and MonteCarloResult backward-compatible tuple unpacking.
+    """
+
+    def test_monte_carlo_result_tuple_unpacking_and_attributes(self):
+        """MonteCarloResult supports both 4-tuple unpacking and rich attribute access."""
+        res = run_monte_carlo_analysis(
+            [16000.0, 10e-9], order=1, filter_type="lpf", target_fc=1000.0,
+            trials=20, fallback=True
+        )
+        # 1. Unpacking backward compatibility
+        fcs, qs, y2, y5 = res
+        self.assertEqual(len(fcs), 20)
+        self.assertIsNone(qs)
+        self.assertGreaterEqual(y5, 0.0)
+        self.assertLessEqual(y5, 100.0)
+
+        # 2. Rich attribute access
+        self.assertEqual(res.total_trials, 20)
+        self.assertEqual(res.successful_trials, 20)
+        self.assertEqual(res.failed_trials, 0)
+        self.assertTrue(res.yield_complete)
+        self.assertEqual(res.failure_rate, 0.0)
+        self.assertGreater(res.mu_fc, 0.0)
+        self.assertGreater(res.std_fc, 0.0)
+
+    @patch("synthesize.loss_function")
+    def test_monte_carlo_handles_failed_trials_gracefully(self, mock_loss):
+        """When SPICE simulations fail or do not converge, Monte Carlo excludes them from statistics and flags yield."""
+        # Simulate 10 trials: 7 successful (1000 Hz), 3 failed (sentinel obj 1e12)
+        mock_loss.side_effect = [
+            (1000.0, 0.7071, 0.0),
+            (1010.0, 0.7071, 0.0),
+            (0.0, 0.0, 1.0e12),      # Trial 3: Failed
+            (990.0, 0.7071, 0.0),
+            (1005.0, 0.7071, 0.0),
+            (0.0, 0.0, 1.0e12),      # Trial 6: Failed
+            (995.0, 0.7071, 0.0),
+            (1002.0, 0.7071, 0.0),
+            (998.0, 0.7071, 0.0),
+            (0.0, 0.0, 1.0e12),      # Trial 10: Failed
+        ]
+
+        res = run_monte_carlo_analysis(
+            [10000.0, 10000.0, 22e-9, 10e-9], order=2, filter_type="lpf", target_fc=1000.0,
+            trials=10, fallback=True, output_plot=None
+        )
+
+        self.assertEqual(res.total_trials, 10)
+        self.assertEqual(res.successful_trials, 7)
+        self.assertEqual(res.failed_trials, 3)
+        self.assertFalse(res.yield_complete)
+        self.assertAlmostEqual(res.failure_rate, 30.0, places=1)
+
+        # Statistical measures must be computed over the 7 valid trials ONLY
+        self.assertEqual(len(res.fcs), 7)
+        self.assertNotIn(0.0, res.fcs)
+        self.assertAlmostEqual(res.mu_fc, 1000.0, delta=5.0)
+        # 100% of the 7 valid trials fall within +/-2% of 1000 Hz
+        self.assertEqual(res.yield_2pct, 100.0)
+        self.assertEqual(res.yield_5pct, 100.0)
+
+
+class TestOpAmpModelSelection(unittest.TestCase):
+    """
+    Automated tests verifying op-amp macro-model injection vs idealized VCVS fallback.
+    """
+
+    def test_ti_opa1678_macro_model_netlist_structure(self):
+        """TI OPA1678 mode includes OPA167x.LIB, dual-rail supplies (+/-15V), decoupling, and subcircuit instantiations."""
+        net = build_spice_netlist(
+            [14700.0, 7870.0, 22e-9, 10e-9], order=2, filter_type="lpf",
+            opamp_model=OPAMP_MODEL_TI, v_supply=15.0
+        )
+        self.assertIn("OPA167x.LIB", net)
+        self.assertIn("Vcc vcc 0 dc 15.0", net)
+        self.assertIn("Vee vee 0 dc -15.0", net)
+        self.assertIn("Cdec1 vcc 0 100n", net)
+        self.assertIn("Cdec2 vee 0 100n", net)
+        self.assertIn("XU1A inp out vcc vee out OPA167x", net)
+        self.assertIn("XU1B 0 out_b vcc vee out_b OPA167x", net)
+        self.assertNotIn("Eop", net)
+
+    def test_idealized_vcvs_fallback_netlist_structure(self):
+        """Idealized mode omits OPA167x.LIB and supplies, using voltage-controlled voltage source."""
+        net = build_spice_netlist(
+            [14700.0, 7870.0, 22e-9, 10e-9], order=2, filter_type="lpf",
+            opamp_model=OPAMP_MODEL_IDEAL
+        )
+        self.assertNotIn("OPA167x.LIB", net)
+        self.assertNotIn("Vcc", net)
+        self.assertNotIn("Vee", net)
+        self.assertIn("Eop out 0 inp out 1e5", net)
+
+    def test_missing_ti_model_file_falls_back_cleanly(self):
+        """When OPA167x.LIB is missing or invalid, build_spice_netlist defaults to idealized VCVS without crashing."""
+        net = build_spice_netlist(
+            [14700.0, 7870.0, 22e-9, 10e-9], order=2, filter_type="lpf",
+            opamp_model=OPAMP_MODEL_TI, model_lib_path="nonexistent_OPA167x.LIB"
+        )
+        self.assertIn("Idealized Operational Amplifier", net)
+        self.assertIn("Eop out 0 inp out 1e5", net)
 
 
 if __name__ == "__main__":

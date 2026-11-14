@@ -1,3 +1,4 @@
+# Preliminary EDA Netlist Export - Subject to PCB DRC, ERC, and Layout Verification
 (export (version D) (design (source "AnalogFilterSynthesis") (tool "Analog-Filter-Synthesizer"))
   (components
     (comp (ref R1_1) (value "14.7k Ohm") (footprint Resistor_SMD:R_0805_2012Metric))
@@ -8,7 +9,9 @@
     (comp (ref R2_2) (value "12.7k Ohm") (footprint Resistor_SMD:R_0805_2012Metric))
     (comp (ref C1_2) (value "33nF") (footprint Capacitor_SMD:C_0805_2012Metric))
     (comp (ref C2_2) (value "4.7nF") (footprint Capacitor_SMD:C_0805_2012Metric))
-    (comp (ref U1) (value "OPA1678") (footprint Package_SO:SOIC-8_3.9x4.9mm_P1.27mm) (description "Dual Op-Amp (Channels A & B)"))
+    (comp (ref U1) (value "OPA1678") (footprint Package_SO:SOIC-8_3.9x4.9mm_P1.27mm) (description "Dual Low-Distortion Audio Op-Amp (SOIC-8, Dual Channel - Sections A & B)"))
+    (comp (ref C_DEC1) (value "100nF") (footprint Capacitor_SMD:C_0805_2012Metric) (description "V+ Decoupling"))
+    (comp (ref C_DEC2) (value "100nF") (footprint Capacitor_SMD:C_0805_2012Metric) (description "V- Decoupling"))
   )
   (nets
     (net (code 1) (name "IN") (node (ref R1_1) (pin 1)))
@@ -18,6 +21,8 @@
     (net (code 5) (name "STAGE2_NODE") (node (ref R1_2) (pin 2)) (node (ref R2_2) (pin 1)) (node (ref C1_2) (pin 1)))
     (net (code 6) (name "STAGE2_INP") (node (ref R2_2) (pin 2)) (node (ref C2_2) (pin 1)) (node (ref U1) (pin 5)))
     (net (code 7) (name "OUT") (node (ref C1_2) (pin 2)) (node (ref U1) (pin 7)) (node (ref U1) (pin 6)))
-    (net (code 8) (name "GND") (node (ref C2_1) (pin 2)) (node (ref C2_2) (pin 2)) (node (ref U1) (pin 4)))
+    (net (code 8) (name "V+") (node (ref U1) (pin 8)) (node (ref C_DEC1) (pin 1)))
+    (net (code 9) (name "V-") (node (ref U1) (pin 4)) (node (ref C_DEC2) (pin 1)))
+    (net (code 10) (name "GND") (node (ref C2_1) (pin 2)) (node (ref C2_2) (pin 2)) (node (ref C_DEC1) (pin 2)) (node (ref C_DEC2) (pin 2)))
   )
 )

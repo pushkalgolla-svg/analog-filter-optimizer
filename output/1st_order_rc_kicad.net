@@ -1,3 +1,4 @@
+# Preliminary EDA Netlist Export - Subject to PCB DRC, ERC, and Layout Verification
 (export (version D) (design (source "AnalogFilterSynthesis") (tool "Analog-Filter-Synthesizer"))
   (components
     (comp (ref R1) (value "16k Ohm") (footprint Resistor_SMD:R_0805_2012Metric))

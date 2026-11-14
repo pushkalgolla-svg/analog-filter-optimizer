@@ -128,6 +128,26 @@ with tol_col1:
 with tol_col2:
     c_tol = st.selectbox("Capacitor Tol.", [1.0, 2.0, 5.0, 10.0], index=2)
 
+# Active Op-Amp & Power Supply Configuration
+is_active_circuit = (order >= 2) or (filter_type in ["hpf", "bpf"])
+if is_active_circuit:
+    st.sidebar.markdown("---")
+    st.sidebar.header("🔬 Op-Amp Macro-Model & Power")
+    opamp_choice = st.sidebar.selectbox(
+        "Amplifier Model",
+        [
+            "Texas Instruments OPA1678 Macro-Model (Rev E)",
+            "Idealized Operational Amplifier (VCVS AOL=100k)"
+        ],
+        index=0
+    )
+    opamp_model = syn.OPAMP_MODEL_TI if "OPA1678" in opamp_choice else syn.OPAMP_MODEL_IDEAL
+    v_supply = 15.0
+    st.sidebar.info("⚡ Dual Supply Rails: ±15.0V with 2x 100nF Decoupling Provisions")
+else:
+    opamp_model = syn.OPAMP_MODEL_IDEAL
+    v_supply = 15.0
+
 st.sidebar.markdown("---")
 st.sidebar.header("🎲 Manufacturing Yield Analysis")
 enable_mc = st.sidebar.checkbox("Run Monte Carlo Statistical Analysis", value=True)
@@ -158,7 +178,9 @@ if run_btn or st.session_state.results is None:
                 r_tol=r_tol,
                 c_tol=c_tol,
                 ngspice_bin=ngspice_bin,
-                fallback=(not ngspice_bin)
+                fallback=(not ngspice_bin),
+                opamp_model=opamp_model,
+                v_supply=v_supply
             )
             if not synth_res.get("success", False):
                 st.error(f"❌ Synthesis failed at stage '{synth_res.get('failure_stage', 'optimization')}': {synth_res.get('error', 'Optimization failed')}")
@@ -187,33 +209,32 @@ if run_btn or st.session_state.results is None:
         mc_results = None
         if enable_mc:
             mc_plot_path = OUTPUT_DIR / "app_mc_plot.png"
-            fcs_mc, qs_mc, y2, y5 = syn.run_monte_carlo_analysis(
+            mc_res = syn.run_monte_carlo_analysis(
                 comm_params, order=order, filter_type=filter_type, target_fc=target_fc,
                 target_q=target_q, r_tol=r_tol, c_tol=c_tol, trials=mc_trials,
-                ngspice_bin=ngspice_bin, fallback=(not ngspice_bin), output_plot=mc_plot_path
+                ngspice_bin=ngspice_bin, fallback=(not ngspice_bin), output_plot=mc_plot_path,
+                opamp_model=opamp_model, v_supply=v_supply
             )
-            n_trials = len(fcs_mc)
-            if n_trials > 0:
-                mu_fc = float(np.mean(fcs_mc))
-                s_fc = float(np.std(fcs_mc, ddof=1)) if n_trials > 1 else float(np.std(fcs_mc))
-                se_fc = s_fc / math.sqrt(n_trials)
-                mc_results = {
-                    "fcs": fcs_mc,
-                    "qs": qs_mc,
-                    "yield_2": y2,
-                    "yield_5": y5,
-                    "plot_path": mc_plot_path,
-                    "trials": n_trials,
-                    "r_tol": r_tol,
-                    "c_tol": c_tol,
-                    "mu_fc": mu_fc,
-                    "s_fc": s_fc,
-                    "se_fc": se_fc,
-                    "ci_mean": (mu_fc - 1.96 * se_fc, mu_fc + 1.96 * se_fc),
-                    "dist_band": (mu_fc - 1.96 * s_fc, mu_fc + 1.96 * s_fc),
-                    "p2_5": float(np.percentile(fcs_mc, 2.5)),
-                    "p97_5": float(np.percentile(fcs_mc, 97.5))
-                }
+            fcs_mc, qs_mc, y2, y5 = mc_res
+            mc_results = {
+                "fcs": fcs_mc,
+                "qs": qs_mc,
+                "yield_2": y2,
+                "yield_5": y5,
+                "plot_path": mc_plot_path,
+                "trials": getattr(mc_res, "total_trials", len(fcs_mc)),
+                "successful_trials": getattr(mc_res, "successful_trials", len(fcs_mc)),
+                "failed_trials": getattr(mc_res, "failed_trials", 0),
+                "yield_complete": getattr(mc_res, "yield_complete", True),
+                "r_tol": r_tol,
+                "c_tol": c_tol,
+                "mu_fc": getattr(mc_res, "mu_fc", float(np.mean(fcs_mc)) if len(fcs_mc) else 0.0),
+                "s_fc": getattr(mc_res, "std_fc", float(np.std(fcs_mc, ddof=1)) if len(fcs_mc) > 1 else 0.0),
+                "ci_mean": getattr(mc_res, "ci_mean", (0.0, 0.0)),
+                "dist_band": getattr(mc_res, "dist_band", (0.0, 0.0)),
+                "p2_5": getattr(mc_res, "p2_5", 0.0),
+                "p97_5": getattr(mc_res, "p97_5", 0.0)
+            }
 
         st.session_state.results = {
             "filter_type": filter_type,
@@ -221,6 +242,8 @@ if run_btn or st.session_state.results is None:
             "top_key": top_key,
             "target_fc": target_fc,
             "target_q": target_q,
+            "opamp_model": opamp_model,
+            "v_supply": v_supply,
             "act_fc": act_fc,
             "q_val": q_val,
             "bandwidth": bandwidth,
@@ -369,13 +392,17 @@ with tab_bode:
 with tab_mc:
     if res["mc_results"]:
         mc = res["mc_results"]
+        if not mc.get("yield_complete", True):
+            st.warning(f"⚠️ Simulation Warning: {mc.get('failed_trials', 0)} of {mc['trials']} trials did not converge. Yield and statistics are calculated strictly over the {mc.get('successful_trials', mc['trials'])} valid trials.")
         mc_col1, mc_col2 = st.columns([3, 1])
         with mc_col1:
             st.image(str(mc["plot_path"]), caption="Statistical Monte Carlo SPICE Verification (Component Gaussian Distribution)", use_container_width=True)
         with mc_col2:
             st.markdown("#### Cutoff Compliance Scorecard")
             st.markdown(f"""
-            - **Statistical Trials**: `{mc['trials']} SPICE runs`
+            - **Statistical Trials**: `{mc['trials']} total runs`
+            - **Successful Converged**: `{mc.get('successful_trials', mc['trials'])} runs`
+            - **Non-Convergent / Failed**: `{mc.get('failed_trials', 0)} runs`
             - **Assumed Tolerances**:
               - Resistors: `±{mc['r_tol']}%`
               - Capacitors: `±{mc['c_tol']}%`
@@ -443,20 +470,20 @@ with tab_theory:
     if res["filter_type"] == "lpf" and res["order"] == 1:
         st.latex(r"H(s) = \frac{1}{1 + sRC}")
         st.latex(r"f_c = \frac{1}{2\pi RC}")
-        st.markdown("**Characteristics**: Single real pole at $\omega_0 = 1/RC$, passband roll-off $-20\text{ dB/decade}$.")
+        st.markdown(r"**Characteristics**: Single real pole at $\omega_0 = 1/RC$, passband roll-off $-20\text{ dB/decade}$.")
     elif res["filter_type"] == "lpf" and res["order"] == 2:
         st.latex(r"H(s) = \frac{1}{s^2 R_1 R_2 C_1 C_2 + s C_2(R_1 + R_2) + 1}")
         st.latex(r"f_0 = \frac{1}{2\pi \sqrt{R_1 R_2 C_1 C_2}}, \quad Q = \frac{\sqrt{R_1 R_2 C_1 C_2}}{C_2(R_1 + R_2)}")
-        st.markdown("**Butterworth Maximally Flat Alignment**: $Q = 1/\sqrt{2} \approx 0.7071$, passband roll-off $-40\text{ dB/decade}$.")
+        st.markdown(r"**Butterworth Maximally Flat Alignment**: $Q = 1/\sqrt{2} \approx 0.7071$, passband roll-off $-40\text{ dB/decade}$.")
     elif res["filter_type"] == "hpf":
         st.latex(r"H(s) = \frac{s^2 R_1 R_2 C_1 C_2}{s^2 R_1 R_2 C_1 C_2 + s R_1(C_1 + C_2) + 1}")
         st.latex(r"f_0 = \frac{1}{2\pi \sqrt{R_1 R_2 C_1 C_2}}, \quad Q = \frac{\sqrt{R_1 R_2 C_1 C_2}}{R_1(C_1 + C_2)}")
-        st.markdown("**Characteristics**: High-pass response, passband attenuation $+40\text{ dB/decade}$ below cutoff.")
+        st.markdown(r"**Characteristics**: High-pass response, passband attenuation $+40\text{ dB/decade}$ below cutoff.")
     elif res["filter_type"] == "bpf":
         st.latex(r"H(s) = \frac{-\frac{s}{R_1 C_1}}{s^2 + s \frac{C_1+C_2}{R_3 C_1 C_2} + \frac{R_1+R_2}{R_1 R_2 R_3 C_1 C_2}}")
         st.latex(r"f_0 = \frac{1}{2\pi C} \sqrt{\frac{1}{R_3}\left(\frac{1}{R_1} + \frac{1}{R_2}\right)}, \quad BW = \frac{1}{\pi R_3 C}, \quad Q = \frac{f_0}{BW}")
-        st.markdown("**Characteristics**: Inverting multiple-feedback band-pass filter with controllable center frequency and selective Q factor.")
+        st.markdown(r"**Characteristics**: Inverting multiple-feedback band-pass filter with controllable center frequency and selective Q factor.")
     elif res["order"] == 4:
         st.latex(r"H(s) = H_1(s) \times H_2(s)")
         st.latex(r"Q_1 = 0.5412, \quad Q_2 = 1.3065, \quad f_{01} = f_{02} = f_c")
-        st.markdown("**Characteristics**: Cascaded 4th-order Butterworth low-pass filter with $-80\text{ dB/decade}$ brickwall stopband roll-off.")
+        st.markdown(r"**Characteristics**: Cascaded 4th-order Butterworth low-pass filter with $-80\text{ dB/decade}$ brickwall stopband roll-off.")

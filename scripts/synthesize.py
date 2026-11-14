@@ -6,12 +6,9 @@ using numerical optimization (SciPy Nelder-Mead) with SPICE simulation in the lo
 automated EIA commercial component snapping (E12, E24, E96), statistical Monte Carlo
 cutoff frequency yield analysis, BOM generation with verified catalog components, and KiCad export.
 
-Supported topologies:
-1. 1st-Order Passive RC Low-Pass Filter (-20 dB/dec)
-2. 2nd-Order Active Sallen-Key Low-Pass Filter (-40 dB/dec, Butterworth Q=0.7071)
-3. 2nd-Order Active Sallen-Key High-Pass Filter (+40 dB/dec, Butterworth Q=0.7071)
-4. 2nd-Order Active Multiple-Feedback (MFB) Band-Pass Filter (center f0, Q, BW)
-5. 4th-Order Cascaded Sallen-Key Low-Pass Filter (-80 dB/dec, Butterworth Q1=0.5412, Q2=1.3065)
+Supports genuine Texas Instruments OPA1678 macro-model simulation (Rev E) with dual-rail
+power supplies (+/-15V) and decoupling, as well as idealized VCVS fallback.
+Thread-safe and concurrency-safe via isolated temporary workspaces.
 """
 
 import argparse
@@ -20,6 +17,8 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import uuid
 from pathlib import Path
 
 import matplotlib
@@ -50,6 +49,14 @@ COMMERCIAL_SIM_DATA_PATH = OUTPUT_DIR / "sim_data_commercial.txt"
 PLOT_PATH = OUTPUT_DIR / "bode_plot.png"
 MC_PLOT_PATH = OUTPUT_DIR / "monte_carlo_yield.png"
 
+# Official TI OPA167x Macro-Model Location
+TI_OPA167X_LIB_PATH = SRC_DIR / "models" / "OPA167x.LIB"
+
+# Simulation Model Identifiers
+OPAMP_MODEL_TI = "ti_opa1678"
+OPAMP_MODEL_IDEAL = "idealized"
+DEFAULT_V_SUPPLY = 15.0  # Volts (+/-15.0V dual supply within TI recommended +/-2.25V to +/-18.0V)
+
 # Target Specifications
 TARGET_CUTOFF_HZ = 1000.0   # 1 kHz (-3dB cutoff point)
 BUTTERWORTH_Q = 1.0 / math.sqrt(2.0)  # Q = 0.7071
@@ -69,6 +76,37 @@ E_SERIES = {
             5.62, 5.76, 5.90, 6.04, 6.19, 6.34, 6.49, 6.65, 6.81, 6.98, 7.15, 7.32,
             7.50, 7.68, 7.87, 8.06, 8.25, 8.45, 8.66, 8.87, 9.09, 9.31, 9.53, 9.76]
 }
+
+
+class MonteCarloResult(tuple):
+    """
+    Subclass of tuple (valid_fcs, valid_qs, yield_2pct, yield_5pct)
+    providing full backward compatibility with 4-tuple unpacking:
+        (fcs, qs, y2, y5) = run_monte_carlo_analysis(...)
+    while offering rich structured attributes for failure tracking and statistical analysis.
+    """
+    def __new__(cls, valid_fcs, valid_qs, yield_2pct, yield_5pct,
+                total_trials=100, successful_trials=100, failed_trials=0,
+                yield_complete=True, failure_rate=0.0,
+                mu_fc=0.0, std_fc=0.0, ci_mean=(0.0, 0.0), dist_band=(0.0, 0.0),
+                p2_5=0.0, p97_5=0.0):
+        instance = super().__new__(cls, (valid_fcs, valid_qs, yield_2pct, yield_5pct))
+        instance.fcs = valid_fcs
+        instance.qs = valid_qs
+        instance.yield_2pct = yield_2pct
+        instance.yield_5pct = yield_5pct
+        instance.total_trials = total_trials
+        instance.successful_trials = successful_trials
+        instance.failed_trials = failed_trials
+        instance.yield_complete = yield_complete
+        instance.failure_rate = failure_rate
+        instance.mu_fc = mu_fc
+        instance.std_fc = std_fc
+        instance.ci_mean = ci_mean
+        instance.dist_band = dist_band
+        instance.p2_5 = p2_5
+        instance.p97_5 = p97_5
+        return instance
 
 
 def snap_to_e_series(value, series="E24"):
@@ -151,15 +189,56 @@ def find_ngspice(custom_path=None):
     return None
 
 
-def run_spice_simulation(params, order=1, filter_type="lpf", ngspice_bin=None, fallback=False, output_data_file=SIM_DATA_PATH, target_fc=TARGET_CUTOFF_HZ):
-    """Injects component values into the netlist template and executes SPICE."""
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    SRC_DIR.mkdir(parents=True, exist_ok=True)
+def ensure_spiceinit(directory):
+    """
+    Writes a local .spiceinit file to the given directory enabling PSpice / LTspice
+    compatibility (set ngbehavior=pslt) so ngspice executes vendor subcircuit models cleanly.
+    """
+    target = Path(directory) / ".spiceinit"
+    content = "set ngbehavior=pslt\nset noaskquit\n"
+    try:
+        if not target.exists() or target.read_text(encoding="utf-8") != content:
+            target.write_text(content, encoding="utf-8")
+    except OSError:
+        pass
 
+
+def build_spice_netlist(params, order=1, filter_type="lpf", target_fc=TARGET_CUTOFF_HZ,
+                        opamp_model=OPAMP_MODEL_TI, v_supply=DEFAULT_V_SUPPLY,
+                        output_data_file="sim_data_raw.txt", model_lib_path=TI_OPA167X_LIB_PATH):
+    """
+    Substitutes component parameters, op-amp macro-model / VCVS blocks, power supply rails,
+    frequency sweep ranges, and output file paths into the SPICE netlist template.
+    """
     f_start = max(1.0, target_fc / 100.0)
     f_stop = min(1e8, target_fc * 100.0)
     f_start_str = f"{f_start:.2f}"
     f_stop_str = f"{f_stop:.2f}"
+    out_file_str = str(output_data_file).replace("\\", "/")
+
+    is_active = (order >= 2) or (filter_type in ["hpf", "bpf"])
+    use_ti_model = (
+        is_active and
+        str(opamp_model).lower().startswith("ti") and
+        (model_lib_path == "OPA167x.LIB" or (model_lib_path is not None and Path(model_lib_path).is_file()))
+    )
+
+    if use_ti_model:
+        lib_ref = "OPA167x.LIB" if model_lib_path == "OPA167x.LIB" else Path(model_lib_path).resolve().as_posix()
+        model_mode_desc = "Texas Instruments OPA1678 Macro-Model (Rev E / SBOS855D)"
+        model_include = f'.include "{lib_ref}"'
+        power_supply_block = (
+            f"* Dual Power Supply Rails (+/-{v_supply:.1f}V)\n"
+            f"Vcc vcc 0 dc {v_supply:.1f}\n"
+            f"Vee vee 0 dc -{v_supply:.1f}\n"
+            f"* Power Supply Decoupling Capacitors (100nF Ceramic to GND)\n"
+            f"Cdec1 vcc 0 100n\n"
+            f"Cdec2 vee 0 100n"
+        )
+    else:
+        model_mode_desc = "Idealized Operational Amplifier (VCVS AOL=100,000)" if is_active else "Passive 1st-Order RC Filter"
+        model_include = "* (No external macro-model library required)"
+        power_supply_block = "* Idealized Circuit - No External Power Supply Rails Required"
 
     if filter_type == "lpf":
         if order == 1:
@@ -169,21 +248,57 @@ def run_spice_simulation(params, order=1, filter_type="lpf", ngspice_bin=None, f
                         .replace("{R_VAL}", f"{r_val:.8e}")
                         .replace("{C_VAL}", f"{c_val:.8e}")
                         .replace("{F_START}", f_start_str)
-                        .replace("{F_STOP}", f_stop_str))
+                        .replace("{F_STOP}", f_stop_str)
+                        .replace("{OUTPUT_DATA_FILE}", out_file_str))
         elif order == 2:
             r1, r2, c1, c2 = params
             template_code = TEMPLATE_2ND_ORDER.read_text(encoding="utf-8")
+            if use_ti_model:
+                opamp_block = (
+                    "* Operational Amplifier Subsystem (Dual OPA1678 SOIC-8)\n"
+                    "* Active Section A: Sallen-Key Low-Pass Buffer (Pins 1, 2, 3, 4, 8)\n"
+                    "XU1A inp out vcc vee out OPA167x\n"
+                    "* Terminated Unused Section B per TI SLOA067 (Pins 5, 6, 7)\n"
+                    "XU1B 0 out_b vcc vee out_b OPA167x"
+                )
+            else:
+                opamp_block = "* Unity-Gain Op-Amp Buffer (VCVS, AOL = 100,000)\nEop out 0 inp out 1e5"
+
             sim_code = (template_code
+                        .replace("{MODEL_MODE_DESC}", model_mode_desc)
+                        .replace("{MODEL_INCLUDE}", model_include)
+                        .replace("{POWER_SUPPLY_BLOCK}", power_supply_block)
+                        .replace("{OPAMP_BLOCK}", opamp_block)
                         .replace("{R1_VAL}", f"{r1:.8e}")
                         .replace("{R2_VAL}", f"{r2:.8e}")
                         .replace("{C1_VAL}", f"{c1:.8e}")
                         .replace("{C2_VAL}", f"{c2:.8e}")
                         .replace("{F_START}", f_start_str)
-                        .replace("{F_STOP}", f_stop_str))
+                        .replace("{F_STOP}", f_stop_str)
+                        .replace("{OUTPUT_DATA_FILE}", out_file_str))
         elif order == 4:
             r1_1, r2_1, c1_1, c2_1, r1_2, r2_2, c1_2, c2_2 = params
             template_code = TEMPLATE_CASCADE4.read_text(encoding="utf-8")
+            if use_ti_model:
+                opamp_block = (
+                    "* Operational Amplifier Subsystem (Dual OPA1678 SOIC-8 Single Package)\n"
+                    "* Section A: Stage 1 Sallen-Key Buffer (Pins 1, 2, 3, 4, 8)\n"
+                    "XU1A inp1 out1 vcc vee out1 OPA167x\n"
+                    "* Section B: Stage 2 Sallen-Key Buffer (Pins 5, 6, 7, 4, 8)\n"
+                    "XU1B inp2 out2 vcc vee out2 OPA167x"
+                )
+            else:
+                opamp_block = (
+                    "* Stage 1 & Stage 2 Idealized Buffers (VCVS AOL=100,000)\n"
+                    "Eop1 out1 0 inp1 out1 1e5\n"
+                    "Eop2 out2 0 inp2 out2 1e5"
+                )
+
             sim_code = (template_code
+                        .replace("{MODEL_MODE_DESC}", model_mode_desc)
+                        .replace("{MODEL_INCLUDE}", model_include)
+                        .replace("{POWER_SUPPLY_BLOCK}", power_supply_block)
+                        .replace("{OPAMP_BLOCK}", opamp_block)
                         .replace("{R1_1_VAL}", f"{r1_1:.8e}")
                         .replace("{R2_1_VAL}", f"{r2_1:.8e}")
                         .replace("{C1_1_VAL}", f"{c1_1:.8e}")
@@ -193,35 +308,88 @@ def run_spice_simulation(params, order=1, filter_type="lpf", ngspice_bin=None, f
                         .replace("{C1_2_VAL}", f"{c1_2:.8e}")
                         .replace("{C2_2_VAL}", f"{c2_2:.8e}")
                         .replace("{F_START}", f_start_str)
-                        .replace("{F_STOP}", f_stop_str))
+                        .replace("{F_STOP}", f_stop_str)
+                        .replace("{OUTPUT_DATA_FILE}", out_file_str))
+        else:
+            raise ValueError(f"Unsupported order for LPF: {order}")
+
     elif filter_type == "hpf":
         r1, r2, c1, c2 = params
         template_code = TEMPLATE_HPF_2ND.read_text(encoding="utf-8")
+        if use_ti_model:
+            opamp_block = (
+                "* Operational Amplifier Subsystem (Dual OPA1678 SOIC-8)\n"
+                "* Active Section A: Sallen-Key High-Pass Buffer (Pins 1, 2, 3, 4, 8)\n"
+                "XU1A inp out vcc vee out OPA167x\n"
+                "* Terminated Unused Section B per TI SLOA067 (Pins 5, 6, 7)\n"
+                "XU1B 0 out_b vcc vee out_b OPA167x"
+            )
+        else:
+            opamp_block = "* Unity-Gain Op-Amp Buffer (VCVS, AOL = 100,000)\nEop out 0 inp out 1e5"
+
         sim_code = (template_code
+                    .replace("{MODEL_MODE_DESC}", model_mode_desc)
+                    .replace("{MODEL_INCLUDE}", model_include)
+                    .replace("{POWER_SUPPLY_BLOCK}", power_supply_block)
+                    .replace("{OPAMP_BLOCK}", opamp_block)
                     .replace("{R1_VAL}", f"{r1:.8e}")
                     .replace("{R2_VAL}", f"{r2:.8e}")
                     .replace("{C1_VAL}", f"{c1:.8e}")
                     .replace("{C2_VAL}", f"{c2:.8e}")
                     .replace("{F_START}", f_start_str)
-                    .replace("{F_STOP}", f_stop_str))
+                    .replace("{F_STOP}", f_stop_str)
+                    .replace("{OUTPUT_DATA_FILE}", out_file_str))
+
     elif filter_type == "bpf":
         r1, r2, r3, c1, c2 = params
         template_code = TEMPLATE_BPF_MFB.read_text(encoding="utf-8")
+        if use_ti_model:
+            opamp_block = (
+                "* Operational Amplifier Subsystem (Dual OPA1678 SOIC-8)\n"
+                "* Active Section A: Inverting MFB Band-Pass Amplifier (Pins 1, 2, 3, 4, 8)\n"
+                "XU1A 0 inm vcc vee out OPA167x\n"
+                "* Terminated Unused Section B per TI SLOA067 (Pins 5, 6, 7)\n"
+                "XU1B 0 out_b vcc vee out_b OPA167x"
+            )
+        else:
+            opamp_block = "* Inverting Op-Amp Buffer (VCVS, AOL = 100,000)\nEop out 0 0 inm 1e5"
+
         sim_code = (template_code
+                    .replace("{MODEL_MODE_DESC}", model_mode_desc)
+                    .replace("{MODEL_INCLUDE}", model_include)
+                    .replace("{POWER_SUPPLY_BLOCK}", power_supply_block)
+                    .replace("{OPAMP_BLOCK}", opamp_block)
                     .replace("{R1_VAL}", f"{r1:.8e}")
                     .replace("{R2_VAL}", f"{r2:.8e}")
                     .replace("{R3_VAL}", f"{r3:.8e}")
                     .replace("{C1_VAL}", f"{c1:.8e}")
                     .replace("{C2_VAL}", f"{c2:.8e}")
                     .replace("{F_START}", f_start_str)
-                    .replace("{F_STOP}", f_stop_str))
+                    .replace("{F_STOP}", f_stop_str)
+                    .replace("{OUTPUT_DATA_FILE}", out_file_str))
     else:
         raise ValueError(f"Unknown filter type: {filter_type}")
 
-    CURRENT_SIM_PATH.write_text(sim_code, encoding="utf-8")
+    return sim_code
 
+
+def run_spice_simulation(params, order=1, filter_type="lpf", ngspice_bin=None,
+                         fallback=False, output_data_file=SIM_DATA_PATH, target_fc=TARGET_CUTOFF_HZ,
+                         opamp_model=OPAMP_MODEL_TI, v_supply=DEFAULT_V_SUPPLY,
+                         work_dir=None, timeout=30.0):
+    """
+    Executes SPICE simulation in an isolated workspace with concurrency safety.
+    If work_dir is provided, writes simulation files inside that directory.
+    If work_dir is None, creates an isolated temporary directory cleaned up on completion.
+    """
+    out_path = Path(output_data_file)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    f_start = max(1.0, target_fc / 100.0)
+    f_stop = min(1e8, target_fc * 100.0)
+
+    # Analytical transfer function mode (fallback or no ngspice binary)
     if fallback or not ngspice_bin:
-        # Analytical AC Transfer Function Simulation
         freqs = np.logspace(np.log10(f_start), np.log10(f_stop), 401)
         w = 2.0 * np.pi * freqs
         s = 1j * w
@@ -249,27 +417,74 @@ def run_spice_simulation(params, order=1, filter_type="lpf", ngspice_bin=None, f
             h = num / denom
 
         vdb = 20.0 * np.log10(np.maximum(np.abs(h), 1e-12))
-        with open(output_data_file, "w", encoding="utf-8") as f:
+        with open(out_path, "w", encoding="utf-8") as f:
             for fr, db in zip(freqs, vdb):
                 f.write(f"{fr:15.8e}  {db:15.8e}\n")
         return
 
-    cmd = [ngspice_bin, "-b", str(CURRENT_SIM_PATH)]
-    result = subprocess.run(cmd, cwd=PROJECT_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"ngspice failed:\n{result.stderr}")
+    # SPICE execution via ngspice binary
+    def execute_in_dir(exec_dir):
+        ensure_spiceinit(exec_dir)
+        # Ensure official TI model library is available locally in the execution directory
+        if TI_OPA167X_LIB_PATH.is_file():
+            local_lib = Path(exec_dir) / "OPA167x.LIB"
+            if not local_lib.exists():
+                try:
+                    shutil.copyfile(TI_OPA167X_LIB_PATH, local_lib)
+                except OSError:
+                    pass
 
-    if output_data_file != SIM_DATA_PATH and SIM_DATA_PATH.exists():
-        shutil.copyfile(SIM_DATA_PATH, output_data_file)
+        raw_filename = f"sim_out_{uuid.uuid4().hex[:8]}.txt"
+        sim_code = build_spice_netlist(
+            params, order=order, filter_type=filter_type, target_fc=target_fc,
+            opamp_model=opamp_model, v_supply=v_supply,
+            output_data_file=raw_filename, model_lib_path="OPA167x.LIB"
+        )
+        sim_file = Path(exec_dir) / f"sim_{uuid.uuid4().hex[:8]}.cir"
+        sim_file.write_text(sim_code, encoding="utf-8")
+
+        # Also write CURRENT_SIM_PATH if in project scope for backward compatibility
+        try:
+            CURRENT_SIM_PATH.write_text(sim_code, encoding="utf-8")
+        except OSError:
+            pass
+
+        cmd = [ngspice_bin, "-b", sim_file.name]
+        try:
+            result = subprocess.run(cmd, cwd=exec_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(f"SPICE simulation timed out after {timeout} seconds.") from exc
+
+        if result.returncode != 0:
+            raise RuntimeError(f"ngspice failed:\n{result.stderr}\n{result.stdout}")
+
+        generated_raw = Path(exec_dir) / raw_filename
+        if not generated_raw.exists():
+            raise FileNotFoundError(f"ngspice completed but output data file was not generated: {generated_raw}\nOutput: {result.stdout}\nError: {result.stderr}")
+
+        shutil.copyfile(generated_raw, out_path)
+        try:
+            generated_raw.unlink()
+            sim_file.unlink()
+        except OSError:
+            pass
+
+    if work_dir is not None:
+        execute_in_dir(work_dir)
+    else:
+        with tempfile.TemporaryDirectory(prefix="sim_run_") as tmp_dir:
+            execute_in_dir(tmp_dir)
 
 
 def parse_simulation_data(data_path=SIM_DATA_PATH):
     """Parses frequency and magnitude columns from ngspice wrdata export."""
-    if not data_path.exists():
+    p = Path(data_path)
+    if not p.exists():
         raise FileNotFoundError(f"Simulation data file missing: {data_path}")
 
     freqs, mags = [], []
-    with open(data_path, "r", encoding="utf-8") as f:
+    with open(p, "r", encoding="utf-8") as f:
         for line in f:
             parts = line.strip().split()
             if len(parts) >= 2:
@@ -319,10 +534,16 @@ def extract_cutoff_frequency(freqs, mags, filter_type="lpf", db_drop=3.0103):
     return freqs[0]
 
 
-def loss_function(params, order=1, filter_type="lpf", ngspice_bin=None, fallback=False, target_fc=TARGET_CUTOFF_HZ, target_q=BUTTERWORTH_Q, output_data_file=SIM_DATA_PATH):
+def loss_function(params, order=1, filter_type="lpf", ngspice_bin=None, fallback=False,
+                  target_fc=TARGET_CUTOFF_HZ, target_q=BUTTERWORTH_Q, output_data_file=SIM_DATA_PATH,
+                  opamp_model=OPAMP_MODEL_TI, v_supply=DEFAULT_V_SUPPLY, work_dir=None, timeout=30.0):
     """Evaluates filter loss: cutoff error + damping penalty."""
     try:
-        run_spice_simulation(params, order=order, filter_type=filter_type, ngspice_bin=ngspice_bin, fallback=fallback, output_data_file=output_data_file, target_fc=target_fc)
+        run_spice_simulation(
+            params, order=order, filter_type=filter_type, ngspice_bin=ngspice_bin,
+            fallback=fallback, output_data_file=output_data_file, target_fc=target_fc,
+            opamp_model=opamp_model, v_supply=v_supply, work_dir=work_dir, timeout=timeout
+        )
         freqs, mags = parse_simulation_data(output_data_file)
         if len(freqs) < 2 or len(mags) < 2:
             return 0.0, 0.0, SENTINEL_FAILURE_OBJ
@@ -490,11 +711,12 @@ def find_commercial_cascade4(target_fc, r_series="E96", c_series="E12"):
 
 def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, target_q=None,
                       r_series="E96", c_series="E12", ngspice_bin=None, fallback=False,
-                      r_tol=None, c_tol=5.0, progress_callback=None, raise_on_error=False):
+                      r_tol=None, c_tol=5.0, progress_callback=None, raise_on_error=False,
+                      opamp_model=OPAMP_MODEL_TI, v_supply=DEFAULT_V_SUPPLY, output_dir=None):
     """
     Unified synthesis and optimization pipeline shared by both CLI and Streamlit GUI.
     1. Validates input specifications safely.
-    2. Runs continuous component optimization:
+    2. Runs continuous component optimization in an isolated temporary workspace:
        - 4th-order LPF: Exact analytical closed-form Butterworth pole-placement sizing.
        - 1st-order, 2nd-order LPF, HPF, BPF: SciPy Nelder-Mead simplex numerical optimization in log10 space.
     3. Validates optimizer convergence, objective value, and component physical sanity.
@@ -531,6 +753,9 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
         ngspice_bin = find_ngspice()
     use_fallback = fallback or not ngspice_bin
 
+    out_dir = Path(output_dir) if output_dir else OUTPUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     # Initial parameter configuration
     if filter_type == "lpf":
         if order == 1:
@@ -554,64 +779,156 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
         comp_names = ["R1", "R2", "R3", "C1", "C2"]
         top_key = "mfb_bpf"
 
-    x0 = [np.log10(p) for p in initial_params]
-    init_fc, init_q, init_err = loss_function(
-        initial_params, order=order, filter_type=filter_type,
-        ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q
-    )
+    with tempfile.TemporaryDirectory(prefix="synth_work_") as synth_work_dir:
+        ensure_spiceinit(synth_work_dir)
+        temp_sim_data = Path(synth_work_dir) / "sim_opt.txt"
+        temp_comm_data = Path(synth_work_dir) / "sim_comm.txt"
 
-    # Stage 1: Continuous Sizing / Numerical Optimization
-    iteration_count = [0]
-    if filter_type == "lpf" and order == 4:
-        optimization_method = "analytical_closed_form"
-        # 4th-order cascaded Butterworth uses exact closed-form stage pole-placement
-        q1 = 0.5412
-        q2 = 1.3065
-        c2_1 = 10e-9
-        c1_1 = 4.0 * (q1 ** 2) * c2_1
-        r_1 = 1.0 / (4.0 * math.pi * target_fc * q1 * c2_1)
-        c2_2 = 4.7e-9
-        c1_2 = 4.0 * (q2 ** 2) * c2_2
-        r_2 = 1.0 / (4.0 * math.pi * target_fc * q2 * c2_2)
-        opt_params = [r_1, r_1, c1_1, c2_1, r_2, r_2, c1_2, c2_2]
-        opt_iterations = 0
-        opt_message = "Analytical closed-form Butterworth cascaded pole-placement sizing succeeded."
-        opt_cost = 0.0
-    else:
-        optimization_method = "nelder_mead"
-
-        def optimizer_objective(log_params):
-            iteration_count[0] += 1
-            if any(not np.isfinite(p) for p in log_params):
-                return SENTINEL_FAILURE_OBJ
-            params = [10.0 ** p for p in log_params]
-            if any(not np.isfinite(p) or p <= 0 for p in params):
-                return SENTINEL_FAILURE_OBJ
-            fc, q, err = loss_function(
-                params, order=order, filter_type=filter_type,
-                ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q
-            )
-            if not np.isfinite(err):
-                err = SENTINEL_FAILURE_OBJ
-            if progress_callback:
-                progress_callback(iteration_count[0], fc, q, err)
-            return err
-
-        res = minimize(
-            optimizer_objective, x0, method="Nelder-Mead",
-            options={"maxiter": 300, "xatol": 1e-4, "fatol": 1e-4}
+        x0 = [np.log10(p) for p in initial_params]
+        init_fc, init_q, init_err = loss_function(
+            initial_params, order=order, filter_type=filter_type,
+            ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q,
+            output_data_file=temp_sim_data, opamp_model=opamp_model, v_supply=v_supply,
+            work_dir=synth_work_dir
         )
 
-        # 1. Validate optimizer convergence
-        if not getattr(res, "success", False):
-            err_msg = f"Nelder-Mead continuous optimization failed to converge: {getattr(res, 'message', 'Optimization unsuccessful')}."
+        # Stage 1: Continuous Sizing / Numerical Optimization
+        iteration_count = [0]
+        if filter_type == "lpf" and order == 4:
+            optimization_method = "analytical_closed_form"
+            q1 = 0.5412
+            q2 = 1.3065
+            c2_1 = 10e-9
+            c1_1 = 4.0 * (q1 ** 2) * c2_1
+            r_1 = 1.0 / (4.0 * math.pi * target_fc * q1 * c2_1)
+            c2_2 = 4.7e-9
+            c1_2 = 4.0 * (q2 ** 2) * c2_2
+            r_2 = 1.0 / (4.0 * math.pi * target_fc * q2 * c2_2)
+            opt_params = [r_1, r_1, c1_1, c2_1, r_2, r_2, c1_2, c2_2]
+            opt_iterations = 0
+            opt_message = "Analytical closed-form Butterworth cascaded pole-placement sizing succeeded."
+            opt_cost = 0.0
+        else:
+            optimization_method = "nelder_mead"
+
+            def optimizer_objective(log_params):
+                iteration_count[0] += 1
+                if any(not np.isfinite(p) for p in log_params):
+                    return SENTINEL_FAILURE_OBJ
+                params = [10.0 ** p for p in log_params]
+                if any(not np.isfinite(p) or p <= 0 for p in params):
+                    return SENTINEL_FAILURE_OBJ
+                fc, q, err = loss_function(
+                    params, order=order, filter_type=filter_type,
+                    ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q,
+                    output_data_file=temp_sim_data, opamp_model=opamp_model, v_supply=v_supply,
+                    work_dir=synth_work_dir
+                )
+                if not np.isfinite(err):
+                    err = SENTINEL_FAILURE_OBJ
+                if progress_callback:
+                    progress_callback(iteration_count[0], fc, q, err)
+                return err
+
+            res = minimize(
+                optimizer_objective, x0, method="Nelder-Mead",
+                options={"maxiter": 300, "xatol": 1e-4, "fatol": 1e-4}
+            )
+
+            # 1. Validate optimizer convergence
+            if not getattr(res, "success", False):
+                err_msg = f"Nelder-Mead continuous optimization failed to converge: {getattr(res, 'message', 'Optimization unsuccessful')}."
+                if raise_on_error:
+                    raise RuntimeError(err_msg)
+                return {
+                    "success": False,
+                    "error": err_msg,
+                    "failure_stage": "continuous_optimization",
+                    "optimizer_message": getattr(res, "message", ""),
+                    "filter_type": filter_type,
+                    "order": order,
+                    "target_fc": float(target_fc),
+                    "target_q": float(target_q),
+                    "optimization_method": optimization_method,
+                }
+
+            # 2. Reject non-finite objective
+            if not np.isfinite(res.fun):
+                err_msg = f"Nelder-Mead optimizer produced a non-finite objective value: {res.fun}."
+                if raise_on_error:
+                    raise RuntimeError(err_msg)
+                return {
+                    "success": False,
+                    "error": err_msg,
+                    "failure_stage": "continuous_optimization",
+                    "optimizer_message": getattr(res, "message", ""),
+                    "filter_type": filter_type,
+                    "order": order,
+                    "target_fc": float(target_fc),
+                    "target_q": float(target_q),
+                    "optimization_method": optimization_method,
+                }
+
+            # 3. Reject failure sentinel objective (>= 1e11)
+            if res.fun >= 1e11:
+                err_msg = (f"Nelder-Mead optimizer failed to find a feasible solution: "
+                           f"objective reached failure sentinel ({res.fun:.2e}). "
+                           f"Please verify circuit specifications and simulator configuration.")
+                if raise_on_error:
+                    raise RuntimeError(err_msg)
+                return {
+                    "success": False,
+                    "error": err_msg,
+                    "failure_stage": "continuous_optimization",
+                    "optimizer_message": getattr(res, "message", ""),
+                    "filter_type": filter_type,
+                    "order": order,
+                    "target_fc": float(target_fc),
+                    "target_q": float(target_q),
+                    "optimization_method": optimization_method,
+                }
+
+            # 4. Validate component values are finite and strictly positive
+            opt_params = [float(10.0 ** p) for p in res.x]
+            if any(not np.isfinite(p) or p <= 0.0 for p in opt_params):
+                err_msg = "Nelder-Mead optimizer produced non-physical, non-finite, or non-positive component values."
+                if raise_on_error:
+                    raise RuntimeError(err_msg)
+                return {
+                    "success": False,
+                    "error": err_msg,
+                    "failure_stage": "continuous_optimization",
+                    "optimizer_message": getattr(res, "message", ""),
+                    "filter_type": filter_type,
+                    "order": order,
+                    "target_fc": float(target_fc),
+                    "target_q": float(target_q),
+                    "optimization_method": optimization_method,
+                }
+
+            opt_iterations = res.nit
+            opt_message = res.message
+            opt_cost = float(res.fun)
+
+        # Stage 1 Verification: Simulate continuous optimal parameters
+        final_fc_opt, final_q_opt, err_opt = loss_function(
+            opt_params, order=order, filter_type=filter_type,
+            ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q,
+            output_data_file=temp_sim_data, opamp_model=opamp_model, v_supply=v_supply,
+            work_dir=synth_work_dir
+        )
+
+        if not os.path.exists(temp_sim_data):
+            if not np.isfinite(final_fc_opt) or final_fc_opt <= 0.0 or err_opt >= 1e11:
+                err_msg = f"Continuous optimal simulation verification produced invalid cutoff frequency: {final_fc_opt} Hz."
+            else:
+                err_msg = f"Continuous optimal simulation verification data file missing: {temp_sim_data}"
             if raise_on_error:
                 raise RuntimeError(err_msg)
             return {
                 "success": False,
                 "error": err_msg,
-                "failure_stage": "continuous_optimization",
-                "optimizer_message": getattr(res, "message", ""),
+                "failure_stage": "continuous_verification",
                 "filter_type": filter_type,
                 "order": order,
                 "target_fc": float(target_fc),
@@ -619,16 +936,16 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
                 "optimization_method": optimization_method,
             }
 
-        # 2. Reject non-finite objective
-        if not np.isfinite(res.fun):
-            err_msg = f"Nelder-Mead optimizer produced a non-finite objective value: {res.fun}."
+        freqs_opt, mags_opt = parse_simulation_data(temp_sim_data)
+
+        if len(freqs_opt) < 2 or len(mags_opt) < 2 or any(not np.isfinite(f) for f in freqs_opt) or any(not np.isfinite(m) for m in mags_opt):
+            err_msg = "Continuous optimal simulation verification generated insufficient, non-finite, or empty frequency response data."
             if raise_on_error:
                 raise RuntimeError(err_msg)
             return {
                 "success": False,
                 "error": err_msg,
-                "failure_stage": "continuous_optimization",
-                "optimizer_message": getattr(res, "message", ""),
+                "failure_stage": "continuous_verification",
                 "filter_type": filter_type,
                 "order": order,
                 "target_fc": float(target_fc),
@@ -636,18 +953,14 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
                 "optimization_method": optimization_method,
             }
 
-        # 3. Reject failure sentinel objective (>= 1e11)
-        if res.fun >= 1e11:
-            err_msg = (f"Nelder-Mead optimizer failed to find a feasible solution: "
-                       f"objective reached failure sentinel ({res.fun:.2e}). "
-                       f"Please verify circuit specifications and simulator configuration.")
+        if not np.isfinite(final_fc_opt) or final_fc_opt <= 0.0 or err_opt >= 1e11:
+            err_msg = f"Continuous optimal simulation verification produced invalid cutoff frequency: {final_fc_opt} Hz."
             if raise_on_error:
                 raise RuntimeError(err_msg)
             return {
                 "success": False,
                 "error": err_msg,
-                "failure_stage": "continuous_optimization",
-                "optimizer_message": getattr(res, "message", ""),
+                "failure_stage": "continuous_verification",
                 "filter_type": filter_type,
                 "order": order,
                 "target_fc": float(target_fc),
@@ -655,120 +968,86 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
                 "optimization_method": optimization_method,
             }
 
-        # 4. Validate component values are finite and strictly positive
-        opt_params = [float(10.0 ** p) for p in res.x]
-        if any(not np.isfinite(p) or p <= 0.0 for p in opt_params):
-            err_msg = "Nelder-Mead optimizer produced non-physical, non-finite, or non-positive component values."
-            if raise_on_error:
-                raise RuntimeError(err_msg)
-            return {
-                "success": False,
-                "error": err_msg,
-                "failure_stage": "continuous_optimization",
-                "optimizer_message": getattr(res, "message", ""),
-                "filter_type": filter_type,
-                "order": order,
-                "target_fc": float(target_fc),
-                "target_q": float(target_q),
-                "optimization_method": optimization_method,
-            }
-
-        opt_iterations = res.nit
-        opt_message = res.message
-        opt_cost = float(res.fun)
-
-    # Stage 1 Verification: Simulate continuous optimal parameters
-    final_fc_opt, final_q_opt, err_opt = loss_function(
-        opt_params, order=order, filter_type=filter_type,
-        ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q,
-        output_data_file=SIM_DATA_PATH
-    )
-    freqs_opt, mags_opt = parse_simulation_data(SIM_DATA_PATH)
-
-    if len(freqs_opt) < 2 or len(mags_opt) < 2 or any(not np.isfinite(f) for f in freqs_opt) or any(not np.isfinite(m) for m in mags_opt):
-        err_msg = "Continuous optimal simulation verification generated insufficient, non-finite, or empty frequency response data."
-        if raise_on_error:
-            raise RuntimeError(err_msg)
-        return {
-            "success": False,
-            "error": err_msg,
-            "failure_stage": "continuous_verification",
-            "filter_type": filter_type,
-            "order": order,
-            "target_fc": float(target_fc),
-            "target_q": float(target_q),
-            "optimization_method": optimization_method,
-        }
-
-    if not np.isfinite(final_fc_opt) or final_fc_opt <= 0.0 or err_opt >= 1e11:
-        err_msg = f"Continuous optimal simulation verification produced invalid cutoff frequency: {final_fc_opt} Hz."
-        if raise_on_error:
-            raise RuntimeError(err_msg)
-        return {
-            "success": False,
-            "error": err_msg,
-            "failure_stage": "continuous_verification",
-            "filter_type": filter_type,
-            "order": order,
-            "target_fc": float(target_fc),
-            "target_q": float(target_q),
-            "optimization_method": optimization_method,
-        }
-
-    # Stage 2: Hardware E-Series Snapping
-    if filter_type == "lpf":
-        if order == 1:
-            comm_r, comm_c, _, _ = find_commercial_pair_1st_order(target_fc, r_series=r_series, c_series=c_series)
-            comm_params = [comm_r, comm_c]
-        elif order == 2:
-            comm_r1, comm_r2, comm_c1, comm_c2, _, _ = find_commercial_components_2nd_order(target_fc, r_series=r_series, c_series=c_series)
+        # Stage 2: Hardware E-Series Snapping
+        if filter_type == "lpf":
+            if order == 1:
+                comm_r, comm_c, _, _ = find_commercial_pair_1st_order(target_fc, r_series=r_series, c_series=c_series)
+                comm_params = [comm_r, comm_c]
+            elif order == 2:
+                comm_r1, comm_r2, comm_c1, comm_c2, _, _ = find_commercial_components_2nd_order(target_fc, r_series=r_series, c_series=c_series)
+                comm_params = [comm_r1, comm_r2, comm_c1, comm_c2]
+            elif order == 4:
+                comm_params = list(find_commercial_cascade4(target_fc, r_series=r_series, c_series=c_series))
+        elif filter_type == "hpf":
+            comm_r1, comm_r2, comm_c1, comm_c2, _, _ = find_commercial_hpf(target_fc, r_series=r_series, c_series=c_series)
             comm_params = [comm_r1, comm_r2, comm_c1, comm_c2]
-        elif order == 4:
-            comm_params = list(find_commercial_cascade4(target_fc, r_series=r_series, c_series=c_series))
-    elif filter_type == "hpf":
-        comm_r1, comm_r2, comm_c1, comm_c2, _, _ = find_commercial_hpf(target_fc, r_series=r_series, c_series=c_series)
-        comm_params = [comm_r1, comm_r2, comm_c1, comm_c2]
-    elif filter_type == "bpf":
-        comm_r1, comm_r2, comm_r3, comm_c1, comm_c2, _, _ = find_commercial_bpf(target_fc, target_q=target_q, r_series=r_series, c_series=c_series)
-        comm_params = [comm_r1, comm_r2, comm_r3, comm_c1, comm_c2]
+        elif filter_type == "bpf":
+            comm_r1, comm_r2, comm_r3, comm_c1, comm_c2, _, _ = find_commercial_bpf(target_fc, target_q=target_q, r_series=r_series, c_series=c_series)
+            comm_params = [comm_r1, comm_r2, comm_r3, comm_c1, comm_c2]
 
-    # Stage 2 Verification: Simulate snapped commercial parameters
-    final_fc_comm, final_q_comm, err_comm = loss_function(
-        comm_params, order=order, filter_type=filter_type,
-        ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q,
-        output_data_file=COMMERCIAL_SIM_DATA_PATH
-    )
-    freqs_comm, mags_comm = parse_simulation_data(COMMERCIAL_SIM_DATA_PATH)
+        # Stage 2 Verification: Simulate snapped commercial parameters
+        final_fc_comm, final_q_comm, err_comm = loss_function(
+            comm_params, order=order, filter_type=filter_type,
+            ngspice_bin=ngspice_bin, fallback=use_fallback, target_fc=target_fc, target_q=target_q,
+            output_data_file=temp_comm_data, opamp_model=opamp_model, v_supply=v_supply,
+            work_dir=synth_work_dir
+        )
 
-    if len(freqs_comm) < 2 or len(mags_comm) < 2 or any(not np.isfinite(f) for f in freqs_comm) or any(not np.isfinite(m) for m in mags_comm):
-        err_msg = "Commercial snapped simulation verification generated insufficient, non-finite, or empty frequency response data."
-        if raise_on_error:
-            raise RuntimeError(err_msg)
-        return {
-            "success": False,
-            "error": err_msg,
-            "failure_stage": "commercial_verification",
-            "filter_type": filter_type,
-            "order": order,
-            "target_fc": float(target_fc),
-            "target_q": float(target_q),
-            "optimization_method": optimization_method,
-        }
+        if not os.path.exists(temp_comm_data):
+            if not np.isfinite(final_fc_comm) or final_fc_comm <= 0.0 or err_comm >= 1e11:
+                err_msg = f"Commercial snapped simulation verification produced invalid cutoff frequency: {final_fc_comm} Hz."
+            else:
+                err_msg = f"Commercial snapped simulation verification data file missing: {temp_comm_data}"
+            if raise_on_error:
+                raise RuntimeError(err_msg)
+            return {
+                "success": False,
+                "error": err_msg,
+                "failure_stage": "commercial_verification",
+                "filter_type": filter_type,
+                "order": order,
+                "target_fc": float(target_fc),
+                "target_q": float(target_q),
+                "optimization_method": optimization_method,
+            }
 
-    if not np.isfinite(final_fc_comm) or final_fc_comm <= 0.0 or err_comm >= 1e11:
-        err_msg = f"Commercial snapped simulation verification produced invalid cutoff frequency: {final_fc_comm} Hz."
-        if raise_on_error:
-            raise RuntimeError(err_msg)
-        return {
-            "success": False,
-            "error": err_msg,
-            "failure_stage": "commercial_verification",
-            "filter_type": filter_type,
-            "order": order,
-            "target_fc": float(target_fc),
-            "target_q": float(target_q),
-            "optimization_method": optimization_method,
-        }
+        freqs_comm, mags_comm = parse_simulation_data(temp_comm_data)
+
+        if len(freqs_comm) < 2 or len(mags_comm) < 2 or any(not np.isfinite(f) for f in freqs_comm) or any(not np.isfinite(m) for m in mags_comm):
+            err_msg = "Commercial snapped simulation verification generated insufficient, non-finite, or empty frequency response data."
+            if raise_on_error:
+                raise RuntimeError(err_msg)
+            return {
+                "success": False,
+                "error": err_msg,
+                "failure_stage": "commercial_verification",
+                "filter_type": filter_type,
+                "order": order,
+                "target_fc": float(target_fc),
+                "target_q": float(target_q),
+                "optimization_method": optimization_method,
+            }
+
+        if not np.isfinite(final_fc_comm) or final_fc_comm <= 0.0 or err_comm >= 1e11:
+            err_msg = f"Commercial snapped simulation verification produced invalid cutoff frequency: {final_fc_comm} Hz."
+            if raise_on_error:
+                raise RuntimeError(err_msg)
+            return {
+                "success": False,
+                "error": err_msg,
+                "failure_stage": "commercial_verification",
+                "filter_type": filter_type,
+                "order": order,
+                "target_fc": float(target_fc),
+                "target_q": float(target_q),
+                "optimization_method": optimization_method,
+            }
+
+        # Persist simulation outputs to output_dir if specified
+        final_sim_data_file = out_dir / "sim_data.txt"
+        final_comm_data_file = out_dir / "sim_data_commercial.txt"
+        shutil.copyfile(temp_sim_data, final_sim_data_file)
+        shutil.copyfile(temp_comm_data, final_comm_data_file)
 
     if filter_type == "bpf":
         _, _, bandwidth_comm = extract_cutoff_frequency(freqs_comm, mags_comm, filter_type="bpf")
@@ -781,13 +1060,21 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
     # Stage 3: Export BOM & KiCad Netlist
     comp_dict = {name: val for name, val in zip(comp_names, comm_params)}
     bom_rows = generate_bom_data(top_key, comp_dict, r_tol=r_tol, c_tol=c_tol)
-    bom_csv_path = OUTPUT_DIR / f"BOM_{top_key}.csv"
+    bom_csv_path = out_dir / f"BOM_{top_key}.csv"
     export_bom_csv(bom_rows, bom_csv_path)
 
-    kicad_net_path = OUTPUT_DIR / f"{top_key}_kicad.net"
+    kicad_net_path = out_dir / f"{top_key}_kicad.net"
     kicad_text = export_kicad_netlist(top_key, comp_dict, kicad_net_path)
 
-    current_spice_text = CURRENT_SIM_PATH.read_text(encoding="utf-8") if CURRENT_SIM_PATH.exists() else ""
+    spice_netlist_text = build_spice_netlist(
+        comm_params, order=order, filter_type=filter_type, target_fc=target_fc,
+        opamp_model=opamp_model, v_supply=v_supply,
+        output_data_file=final_comm_data_file, model_lib_path=TI_OPA167X_LIB_PATH
+    )
+    try:
+        CURRENT_SIM_PATH.write_text(spice_netlist_text, encoding="utf-8")
+    except OSError:
+        pass
 
     return {
         "success": True,
@@ -797,6 +1084,8 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
         "top_key": top_key,
         "target_fc": float(target_fc),
         "target_q": float(target_q),
+        "opamp_model": opamp_model,
+        "v_supply": float(v_supply),
         "r_series": r_series,
         "c_series": c_series,
         "r_tol": float(r_tol),
@@ -824,7 +1113,7 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
         "bom_csv_path": bom_csv_path,
         "kicad_net_path": kicad_net_path,
         "kicad_text": kicad_text,
-        "spice_text": current_spice_text,
+        "spice_text": spice_netlist_text,
         "sim_engine": "ngspice" if not use_fallback else "analytical",
     }
 
@@ -881,6 +1170,7 @@ def generate_bode_plot(freqs_opt, mags_opt, target_fc, achieved_fc_opt,
     ax.legend(loc="lower left" if filter_type != "hpf" else "lower right", frameon=True, fontsize=9.5)
 
     plt.tight_layout()
+    output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_path, dpi=300)
     plt.close()
@@ -888,132 +1178,174 @@ def generate_bode_plot(freqs_opt, mags_opt, target_fc, achieved_fc_opt,
 
 def run_monte_carlo_analysis(comm_params, order=1, filter_type="lpf", target_fc=TARGET_CUTOFF_HZ,
                              r_tol=1.0, c_tol=5.0, trials=100, target_q=BUTTERWORTH_Q,
-                             ngspice_bin=None, fallback=False, output_plot=MC_PLOT_PATH):
+                             ngspice_bin=None, fallback=False, output_plot=MC_PLOT_PATH,
+                             opamp_model=OPAMP_MODEL_TI, v_supply=DEFAULT_V_SUPPLY, seed=42):
     """
-    Executes N statistical Monte Carlo SPICE simulations with Gaussian component variations.
-    Accurately computes cutoff-frequency compliance yield and statistical coverage intervals.
+    Executes N statistical Monte Carlo SPICE simulations with Gaussian component variations
+    in an isolated temporary workspace.
+
+    Robust Failure Handling:
+    - Explicitly detects non-convergent, timed-out, or physically invalid SPICE runs.
+    - Accurately tracks successful_trials vs failed_trials.
+    - Computes statistics (mu, std, confidence intervals) and compliance yield ONLY over valid trials.
+    - Marks yield as incomplete (yield_complete=False) when simulation failures occur.
+    - Returns a MonteCarloResult tuple subclass preserving backward compatibility for (fcs, qs, y2, y5).
     """
     print(f"\nRunning {trials} Monte Carlo statistical SPICE simulations...", flush=True)
     print(f"Assumed Component Tolerances: Resistors = +/-{r_tol}%, Capacitors = +/-{c_tol}%", flush=True)
-
-    mc_temp_file = OUTPUT_DIR / "mc_temp_sim.txt"
-    fcs = []
-    qs = []
+    print(f"Amplifier Model: {opamp_model} (Supply: +/-{v_supply}V)", flush=True)
 
     r_sigma = (r_tol / 100.0) / 3.0
     c_sigma = (c_tol / 100.0) / 3.0
-    np.random.seed(42)
+    if seed is not None:
+        np.random.seed(seed)
 
-    for i in range(trials):
-        samp_params = []
-        for p_idx, val in enumerate(comm_params):
-            if filter_type == "lpf" and order == 1:
-                sig = r_sigma if p_idx == 0 else c_sigma
-            elif filter_type in ["lpf", "hpf"] and order == 2:
-                sig = r_sigma if p_idx < 2 else c_sigma
-            elif filter_type == "bpf":
-                sig = r_sigma if p_idx < 3 else c_sigma
-            elif filter_type == "lpf" and order == 4:
-                sig = r_sigma if p_idx in [0, 1, 4, 5] else c_sigma
+    valid_fcs = []
+    valid_qs = []
+    successful_trials = 0
+    failed_trials = 0
+
+    with tempfile.TemporaryDirectory(prefix="mc_run_") as mc_work_dir:
+        ensure_spiceinit(mc_work_dir)
+        mc_temp_data = Path(mc_work_dir) / "mc_trial_out.txt"
+
+        for i in range(trials):
+            samp_params = []
+            for p_idx, val in enumerate(comm_params):
+                if filter_type == "lpf" and order == 1:
+                    sig = r_sigma if p_idx == 0 else c_sigma
+                elif filter_type in ["lpf", "hpf"] and order == 2:
+                    sig = r_sigma if p_idx < 2 else c_sigma
+                elif filter_type == "bpf":
+                    sig = r_sigma if p_idx < 3 else c_sigma
+                elif filter_type == "lpf" and order == 4:
+                    sig = r_sigma if p_idx in [0, 1, 4, 5] else c_sigma
+                else:
+                    sig = r_sigma
+                samp_params.append(val * (1.0 + np.random.normal(0, sig)))
+
+            fc, q, err = loss_function(
+                samp_params, order=order, filter_type=filter_type, ngspice_bin=ngspice_bin,
+                fallback=fallback, target_fc=target_fc, target_q=target_q,
+                output_data_file=mc_temp_data, opamp_model=opamp_model, v_supply=v_supply,
+                work_dir=mc_work_dir, timeout=15.0
+            )
+
+            # Validate that trial converged to a physical finite frequency
+            if np.isfinite(fc) and fc > 0.0 and err < 1e11:
+                valid_fcs.append(float(fc))
+                if order == 2 or filter_type == "bpf":
+                    valid_qs.append(float(q) if np.isfinite(q) else float(target_q))
+                successful_trials += 1
             else:
-                sig = r_sigma
-            samp_params.append(val * (1.0 + np.random.normal(0, sig)))
+                failed_trials += 1
 
-        fc, q, _ = loss_function(samp_params, order=order, filter_type=filter_type, ngspice_bin=ngspice_bin,
-                                 fallback=fallback, target_fc=target_fc, target_q=target_q, output_data_file=mc_temp_file)
-        fcs.append(fc)
-        if order == 2 or filter_type == "bpf":
-            qs.append(q)
+            if (i + 1) % 25 == 0 or (i + 1) == trials:
+                print(f"  Completed {i + 1:3d}/{trials} trials ({successful_trials} successful, {failed_trials} failed)...", flush=True)
 
-        if (i + 1) % 25 == 0 or (i + 1) == trials:
-            print(f"  Completed {i + 1:3d}/{trials} trials...", flush=True)
+    valid_fcs = np.array(valid_fcs, dtype=float)
+    valid_qs = np.array(valid_qs, dtype=float) if (order == 2 or filter_type == "bpf") else None
+    yield_complete = (failed_trials == 0)
+    failure_rate = (failed_trials / trials * 100.0) if trials > 0 else 0.0
 
-    if mc_temp_file.exists():
-        mc_temp_file.unlink()
+    if successful_trials > 0:
+        yield_2pct = float(np.sum(np.abs(valid_fcs - target_fc) <= 0.02 * target_fc) / successful_trials * 100.0)
+        yield_5pct = float(np.sum(np.abs(valid_fcs - target_fc) <= 0.05 * target_fc) / successful_trials * 100.0)
 
-    fcs = np.array(fcs)
-    qs = np.array(qs) if (order == 2 or filter_type == "bpf") else None
-
-    # Cutoff Frequency Compliance Yield
-    yield_2pct = float(np.sum(np.abs(fcs - target_fc) <= 0.02 * target_fc) / trials * 100.0)
-    yield_5pct = float(np.sum(np.abs(fcs - target_fc) <= 0.05 * target_fc) / trials * 100.0)
-
-    # Statistical intervals
-    mu_fc = float(np.mean(fcs))
-    std_fc = float(np.std(fcs, ddof=1)) if len(fcs) > 1 else float(np.std(fcs))
-    se_fc = std_fc / math.sqrt(trials)
-    ci_mean_low = mu_fc - 1.96 * se_fc
-    ci_mean_high = mu_fc + 1.96 * se_fc
-    dist_band_low = mu_fc - 1.96 * std_fc
-    dist_band_high = mu_fc + 1.96 * std_fc
-    p2_5 = float(np.percentile(fcs, 2.5))
-    p97_5 = float(np.percentile(fcs, 97.5))
-
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5), dpi=300)
-
-    # Histogram 1: Cutoff / Center Frequency
-    ax1.hist(fcs, bins=22, color="#1f77b4", edgecolor="black", alpha=0.7, density=True)
-    std_safe = max(std_fc, 1e-6)
-    x_grid = np.linspace(min(fcs) - 20, max(fcs) + 20, 200)
-    pdf = (1.0 / (std_safe * np.sqrt(2.0 * np.pi))) * np.exp(-0.5 * ((x_grid - mu_fc) / std_safe) ** 2)
-    ax1.plot(x_grid, pdf, color="#0b407a", linewidth=2.0, label=f"Gaussian Fit ($\\mu$={mu_fc:.1f}Hz, s={std_fc:.1f}Hz)")
-
-    ax1.axvline(target_fc, color="#d62728", linestyle="--", linewidth=2.0, label=f"Target ({target_fc:.0f} Hz)")
-    ax1.axvspan(target_fc * 0.98, target_fc * 1.02, color="#2ca02c", alpha=0.25, label=f"±2% Spec Band (Compliance: {yield_2pct:.1f}%)")
-    ax1.axvspan(target_fc * 0.95, target_fc * 1.05, color="#2ca02c", alpha=0.10, label=f"±5% Spec Band (Compliance: {yield_5pct:.1f}%)")
-
-    ax1.set_title(f"Monte Carlo Frequency Distribution ({trials} Runs)\nAssumed Tolerances: Resistors ±{r_tol}%, Capacitors ±{c_tol}%", fontsize=11, pad=12)
-    ax1.set_xlabel("Frequency (Hz)", fontsize=10, fontweight="bold")
-    ax1.set_ylabel("Probability Density", fontsize=10, fontweight="bold")
-    ax1.legend(loc="upper right", frameon=True, fontsize=8.5)
-    ax1.grid(True, linestyle="--", alpha=0.6)
-
-    # Subplot 2: Q factor or CDF
-    if qs is not None:
-        ax2.hist(qs, bins=22, color="#ff7f0e", edgecolor="black", alpha=0.7, density=True)
-        mu_q = float(np.mean(qs))
-        std_q = float(np.std(qs, ddof=1)) if len(qs) > 1 else float(np.std(qs))
-        std_q_safe = max(std_q, 1e-6)
-        xq_grid = np.linspace(min(qs) - 0.05, max(qs) + 0.05, 200)
-        pdf_q = (1.0 / (std_q_safe * np.sqrt(2.0 * np.pi))) * np.exp(-0.5 * ((xq_grid - mu_q) / std_q_safe) ** 2)
-        ax2.plot(xq_grid, pdf_q, color="#b35400", linewidth=2.0, label=f"Gaussian Fit ($\\mu_Q$={mu_q:.4f}, $s_Q$={std_q:.4f})")
-        ax2.axvline(target_q, color="#d62728", linestyle="--", linewidth=2.0, label=f"Target Q ({target_q:.4f})")
-        ax2.set_title(f"Monte Carlo Quality Factor (Q) Distribution\n$\\mu_Q$ = {mu_q:.4f}, $s_Q$ = {std_q:.4f}", fontsize=11, pad=12)
-        ax2.set_xlabel("Quality Factor (Q)", fontsize=10, fontweight="bold")
-        ax2.set_ylabel("Probability Density", fontsize=10, fontweight="bold")
-        ax2.legend(loc="upper right", frameon=True, fontsize=8.5)
-        ax2.grid(True, linestyle="--", alpha=0.6)
+        mu_fc = float(np.mean(valid_fcs))
+        std_fc = float(np.std(valid_fcs, ddof=1)) if successful_trials > 1 else float(np.std(valid_fcs))
+        se_fc = std_fc / math.sqrt(successful_trials)
+        ci_mean_low = mu_fc - 1.96 * se_fc
+        ci_mean_high = mu_fc + 1.96 * se_fc
+        dist_band_low = mu_fc - 1.96 * std_fc
+        dist_band_high = mu_fc + 1.96 * std_fc
+        p2_5 = float(np.percentile(valid_fcs, 2.5))
+        p97_5 = float(np.percentile(valid_fcs, 97.5))
     else:
-        sorted_fcs = np.sort(fcs)
-        cdf = np.arange(1, len(sorted_fcs) + 1) / len(sorted_fcs) * 100.0
-        ax2.plot(sorted_fcs, cdf, color="#2ca02c", linewidth=2.5, label="Empirical CDF")
-        ax2.axvline(target_fc, color="#d62728", linestyle="--", label=f"Target ({target_fc:.0f} Hz)")
-        ax2.axhline(50.0, color="#7f7f7f", linestyle=":", alpha=0.7)
-        ax2.set_title("Cumulative Frequency Distribution Curve", fontsize=11, pad=12)
-        ax2.set_xlabel("Frequency (Hz)", fontsize=10, fontweight="bold")
-        ax2.set_ylabel("Cumulative Probability (%)", fontsize=10, fontweight="bold")
-        ax2.legend(loc="lower right", frameon=True, fontsize=9.0)
-        ax2.grid(True, linestyle="--", alpha=0.6)
+        yield_2pct = 0.0
+        yield_5pct = 0.0
+        mu_fc = 0.0
+        std_fc = 0.0
+        ci_mean_low, ci_mean_high = 0.0, 0.0
+        dist_band_low, dist_band_high = 0.0, 0.0
+        p2_5, p97_5 = 0.0, 0.0
 
-    plt.tight_layout()
-    output_plot.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(output_plot, dpi=300)
-    plt.close()
+    # Plotting Monte Carlo distributions
+    if successful_trials > 0 and output_plot:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5), dpi=300)
+
+        # Histogram 1: Cutoff / Center Frequency
+        ax1.hist(valid_fcs, bins=max(10, min(30, int(successful_trials / 4))),
+                 color="#1f77b4", edgecolor="black", alpha=0.7, density=True)
+        std_safe = max(std_fc, 1e-6)
+        x_grid = np.linspace(min(valid_fcs) - 20, max(valid_fcs) + 20, 200)
+        pdf = (1.0 / (std_safe * np.sqrt(2.0 * np.pi))) * np.exp(-0.5 * ((x_grid - mu_fc) / std_safe) ** 2)
+        ax1.plot(x_grid, pdf, color="#0b407a", linewidth=2.0, label=f"Gaussian Fit ($\\mu$={mu_fc:.1f}Hz, s={std_fc:.1f}Hz)")
+
+        ax1.axvline(target_fc, color="#d62728", linestyle="--", linewidth=2.0, label=f"Target ({target_fc:.0f} Hz)")
+        ax1.axvspan(target_fc * 0.98, target_fc * 1.02, color="#2ca02c", alpha=0.25, label=f"±2% Spec Band (Compliance: {yield_2pct:.1f}%)")
+        ax1.axvspan(target_fc * 0.95, target_fc * 1.05, color="#2ca02c", alpha=0.10, label=f"±5% Spec Band (Compliance: {yield_5pct:.1f}%)")
+
+        title_suffix = "" if yield_complete else f" (Warning: {failed_trials} non-convergent trials excluded)"
+        ax1.set_title(f"Monte Carlo Frequency Distribution ({successful_trials}/{trials} Valid Runs){title_suffix}\nAssumed Tolerances: Resistors ±{r_tol}%, Capacitors ±{c_tol}%", fontsize=10.5, pad=12)
+        ax1.set_xlabel("Frequency (Hz)", fontsize=10, fontweight="bold")
+        ax1.set_ylabel("Probability Density", fontsize=10, fontweight="bold")
+        ax1.legend(loc="upper right", frameon=True, fontsize=8.0)
+        ax1.grid(True, linestyle="--", alpha=0.6)
+
+        # Subplot 2: Q factor or CDF
+        if valid_qs is not None and len(valid_qs) > 0:
+            ax2.hist(valid_qs, bins=max(10, min(30, int(len(valid_qs) / 4))),
+                     color="#ff7f0e", edgecolor="black", alpha=0.7, density=True)
+            mu_q = float(np.mean(valid_qs))
+            std_q = float(np.std(valid_qs, ddof=1)) if len(valid_qs) > 1 else float(np.std(valid_qs))
+            std_q_safe = max(std_q, 1e-6)
+            xq_grid = np.linspace(min(valid_qs) - 0.05, max(valid_qs) + 0.05, 200)
+            pdf_q = (1.0 / (std_q_safe * np.sqrt(2.0 * np.pi))) * np.exp(-0.5 * ((xq_grid - mu_q) / std_q_safe) ** 2)
+            ax2.plot(xq_grid, pdf_q, color="#b35400", linewidth=2.0, label=f"Gaussian Fit ($\\mu_Q$={mu_q:.4f}, $s_Q$={std_q:.4f})")
+            ax2.axvline(target_q, color="#d62728", linestyle="--", linewidth=2.0, label=f"Target Q ({target_q:.4f})")
+            ax2.set_title(f"Monte Carlo Quality Factor (Q) Distribution\n$\\mu_Q$ = {mu_q:.4f}, $s_Q$ = {std_q:.4f}", fontsize=10.5, pad=12)
+            ax2.set_xlabel("Quality Factor (Q)", fontsize=10, fontweight="bold")
+            ax2.set_ylabel("Probability Density", fontsize=10, fontweight="bold")
+            ax2.legend(loc="upper right", frameon=True, fontsize=8.0)
+            ax2.grid(True, linestyle="--", alpha=0.6)
+        else:
+            sorted_fcs = np.sort(valid_fcs)
+            cdf = np.arange(1, len(sorted_fcs) + 1) / len(sorted_fcs) * 100.0
+            ax2.plot(sorted_fcs, cdf, color="#2ca02c", linewidth=2.5, label="Empirical CDF")
+            ax2.axvline(target_fc, color="#d62728", linestyle="--", label=f"Target ({target_fc:.0f} Hz)")
+            ax2.axhline(50.0, color="#7f7f7f", linestyle=":", alpha=0.7)
+            ax2.set_title("Cumulative Frequency Distribution Curve", fontsize=10.5, pad=12)
+            ax2.set_xlabel("Frequency (Hz)", fontsize=10, fontweight="bold")
+            ax2.set_ylabel("Cumulative Probability (%)", fontsize=10, fontweight="bold")
+            ax2.legend(loc="lower right", frameon=True, fontsize=8.5)
+            ax2.grid(True, linestyle="--", alpha=0.6)
+
+        plt.tight_layout()
+        out_p = Path(output_plot)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(out_p, dpi=300)
+        plt.close()
 
     print("\n" + "=" * 76, flush=True)
     print("       MONTE CARLO COMPONENT TOLERANCE & FREQUENCY YIELD REPORT            ", flush=True)
     print("=" * 76, flush=True)
-    print(f"Number of Statistical Trials:   {trials} SPICE simulations", flush=True)
+    print(f"Total Statistical Trials:       {trials} runs", flush=True)
+    print(f"Successful Converged Trials:    {successful_trials} ({successful_trials/trials*100:.1f}%)", flush=True)
+    print(f"Non-Convergent / Failed Trials: {failed_trials} ({failure_rate:.1f}%)", flush=True)
+    if not yield_complete:
+        print(">> WARNING: Non-convergent trials were excluded from yield calculation! <<", flush=True)
     print(f"Assumed Component Tolerances:   Resistors: +/-{r_tol:.1f}% | Capacitors: +/-{c_tol:.1f}%", flush=True)
     print(f"Cutoff Frequency Mean (mu):     {mu_fc:.2f} Hz", flush=True)
     print(f"Cutoff Sample Std Dev (s):      {std_fc:.2f} Hz", flush=True)
-    print(f"Mean 95% Confidence Interval:   [{ci_mean_low:.2f} Hz, {ci_mean_high:.2f} Hz] (mu +/- 1.96*s/sqrt(N))", flush=True)
+    print(f"Mean 95% Confidence Interval:   [{ci_mean_low:.2f} Hz, {ci_mean_high:.2f} Hz] (mu +/- 1.96*s/sqrt(N_valid))", flush=True)
     print(f"Approx. 95% Distribution Band:  [{dist_band_low:.2f} Hz, {dist_band_high:.2f} Hz] (mu +/- 1.96*s)", flush=True)
     print(f"Empirical 95% Interval:         [{p2_5:.2f} Hz, {p97_5:.2f} Hz] (2.5th to 97.5th percentile)", flush=True)
-    print(f"Extreme Frequency Range:        [{np.min(fcs):.2f} Hz, {np.max(fcs):.2f} Hz]", flush=True)
-    if qs is not None:
-        print(f"Quality Factor Q Mean (mu):     {np.mean(qs):.4f} (Target: {target_q:.4f})", flush=True)
-        print(f"Quality Factor Q Sample Std Dev:{np.std(qs, ddof=1):.4f}", flush=True)
+    if successful_trials > 0:
+        print(f"Extreme Frequency Range:        [{np.min(valid_fcs):.2f} Hz, {np.max(valid_fcs):.2f} Hz]", flush=True)
+    if valid_qs is not None and len(valid_qs) > 0:
+        print(f"Quality Factor Q Mean (mu):     {np.mean(valid_qs):.4f} (Target: {target_q:.4f})", flush=True)
+        print(f"Quality Factor Q Sample Std Dev:{np.std(valid_qs, ddof=1):.4f}", flush=True)
     print("-" * 76, flush=True)
     print(f"Cutoff Compliance Yield (+/-2% Spec Band): {yield_2pct:6.2f} %", flush=True)
     print(f"Cutoff Compliance Yield (+/-5% Spec Band): {yield_5pct:6.2f} %", flush=True)
@@ -1022,7 +1354,23 @@ def run_monte_carlo_analysis(comm_params, order=1, filter_type="lpf", target_fc=
     print(f"Monte Carlo Yield Plot Saved:   {output_plot}", flush=True)
     print("=" * 76 + "\n", flush=True)
 
-    return fcs, qs, yield_2pct, yield_5pct
+    return MonteCarloResult(
+        valid_fcs=valid_fcs,
+        valid_qs=valid_qs,
+        yield_2pct=yield_2pct,
+        yield_5pct=yield_5pct,
+        total_trials=trials,
+        successful_trials=successful_trials,
+        failed_trials=failed_trials,
+        yield_complete=yield_complete,
+        failure_rate=failure_rate,
+        mu_fc=mu_fc,
+        std_fc=std_fc,
+        ci_mean=(ci_mean_low, ci_mean_high),
+        dist_band=(dist_band_low, dist_band_high),
+        p2_5=p2_5,
+        p97_5=p97_5
+    )
 
 
 def main():
@@ -1033,6 +1381,9 @@ def main():
     parser.add_argument("--q", type=float, default=None, help="Target Quality Factor Q (default: 0.7071 for Butterworth, 2.0 for BPF)")
     parser.add_argument("--series", type=str, default="E24", choices=["E12", "E24", "E96"],
                         help="Resistor EIA standard series for commercial snapping (default: E24)")
+    parser.add_argument("--opamp-model", type=str, default=OPAMP_MODEL_TI, choices=[OPAMP_MODEL_TI, OPAMP_MODEL_IDEAL],
+                        help=f"Op-amp simulation model: {OPAMP_MODEL_TI} or {OPAMP_MODEL_IDEAL}")
+    parser.add_argument("--v-supply", type=float, default=DEFAULT_V_SUPPLY, help="Dual supply rail voltage +/-V (default: 15.0V)")
     parser.add_argument("--ngspice", help="Path to ngspice binary", default=None)
     parser.add_argument("--fallback", action="store_true", help="Use analytical SPICE fallback simulator")
     parser.add_argument("--monte-carlo", action="store_true", help="Run statistical Monte Carlo tolerance analysis")
@@ -1048,88 +1399,39 @@ def main():
     c_series = "E12"
     target_q = args.q if args.q is not None else (2.0 if filter_type == "bpf" else BUTTERWORTH_Q)
 
-    if args.r_tol is not None:
-        r_tol = args.r_tol
-    else:
-        r_tol = 1.0 if r_series == "E96" else 5.0
-    c_tol = args.c_tol
+    ngspice_bin = args.ngspice or find_ngspice()
+    r_tol = args.r_tol if args.r_tol is not None else (1.0 if r_series == "E96" else 5.0)
 
-    ngspice_bin = find_ngspice(args.ngspice)
-    use_fallback = args.fallback or not ngspice_bin
-
-    if ngspice_bin and not use_fallback:
-        print(f"[INFO] Using SPICE simulator: {ngspice_bin}", flush=True)
-    else:
-        print("[INFO] Running in analytical SPICE mode.", flush=True)
-
-    print("\n" + "=" * 76, flush=True)
-    if filter_type == "lpf":
-        type_title = f"{order}TH-ORDER PASSIVE RC" if order == 1 else f"{order}ND-ORDER ACTIVE SALLEN-KEY (BUTTERWORTH)" if order == 2 else "4TH-ORDER CASCADED SALLEN-KEY (BUTTERWORTH)"
-    elif filter_type == "hpf":
-        type_title = "2ND-ORDER ACTIVE SALLEN-KEY HIGH-PASS (BUTTERWORTH)"
-    elif filter_type == "bpf":
-        type_title = f"2ND-ORDER ACTIVE MULTIPLE-FEEDBACK BAND-PASS (Q={target_q:.2f})"
-    print(f"      NUMERICAL OPTIMIZATION-BASED {type_title} FILTER SYNTHESIZER      ", flush=True)
-    print("=" * 76, flush=True)
-    print(f"Target Frequency (-3dB or Center): {target_fc:.2f} Hz", flush=True)
-    print(f"Commercial Series Selection:       Resistors: {r_series} | Capacitors: {c_series}", flush=True)
-
-    def print_progress(step, fc, q, err):
-        if step % 10 == 0 or step == 1:
-            print(f"  Step {step:3d} | fc = {fc:8.2f} Hz | Q = {q:.3f} | Error = {err:10.2e}", flush=True)
-
-    print("-" * 76, flush=True)
-    if filter_type == "lpf" and order == 4:
-        print("Stage 1: Running exact analytical closed-form Butterworth pole-placement sizing...", flush=True)
-    else:
-        print("Stage 1: Running continuous numerical optimization (Nelder-Mead simplex)...", flush=True)
+    print(f"\nSynthesizing {order}-order {filter_type.upper()} targeting fc = {target_fc:.2f} Hz...")
+    print(f"Simulation Model: {args.opamp_model} (Supply: +/-{args.v_supply}V)")
 
     result = synthesize_filter(
-        filter_type=filter_type, order=order, target_fc=target_fc, target_q=target_q,
-        r_series=r_series, c_series=c_series, ngspice_bin=ngspice_bin, fallback=use_fallback,
-        r_tol=r_tol, c_tol=c_tol, progress_callback=print_progress
+        filter_type=filter_type,
+        order=order,
+        target_fc=target_fc,
+        target_q=target_q,
+        r_series=r_series,
+        c_series=c_series,
+        r_tol=r_tol,
+        c_tol=args.c_tol,
+        ngspice_bin=ngspice_bin,
+        fallback=args.fallback,
+        opamp_model=args.opamp_model,
+        v_supply=args.v_supply,
+        raise_on_error=True
     )
 
-    if not result.get("success", False):
-        print(f"\n[ERROR] Filter synthesis failed at stage '{result.get('failure_stage', 'optimization')}':", file=sys.stderr)
-        print(f"        {result.get('error')}", file=sys.stderr)
-        sys.exit(1)
-
-    print("-" * 76, flush=True)
-    if result["optimization_method"] == "analytical_closed_form":
-        print(f"Analytical closed-form sizing completed successfully!", flush=True)
-    else:
-        print(f"Continuous optimization completed (Iterations: {result['opt_iterations']})!", flush=True)
-    print(f"Stage 2: Snapped to standard commercial components ({r_series} / {c_series}).", flush=True)
+    print(f"Optimal Continuous fc: {result['final_fc_opt']:.2f} Hz (Error: {result['pct_err_opt']:.2f}%)")
+    print(f"Commercial Snapped fc: {result['final_fc_comm']:.2f} Hz (Error: {result['pct_err_comm']:.2f}%)")
+    print(f"BOM exported: {result['bom_csv_path']}")
+    print(f"KiCad Netlist exported: {result['kicad_net_path']}")
 
     generate_bode_plot(
         result["freqs_opt"], result["mags_opt"], target_fc, result["final_fc_opt"],
-        freqs_comm=result["freqs_comm"], mags_comm=result["mags_comm"],
-        achieved_fc_comm=result["final_fc_comm"],
-        order=order, filter_type=filter_type, output_path=PLOT_PATH
+        result["freqs_comm"], result["mags_comm"], result["final_fc_comm"],
+        order=order, filter_type=filter_type
     )
-
-    print("\n" + "=" * 76, flush=True)
-    print(f"          FINAL SYNTHESIS & HARDWARE SNAPPING REPORT ({type_title})          ", flush=True)
-    print("=" * 76, flush=True)
-    print(f"{'Specification':<26} | {'Initial Guess':<15} | {'Continuous Optimal':<18} | {'Commercial (' + r_series + ')':<15}", flush=True)
-    print("-" * 76, flush=True)
-    for name, init_v, opt_v, comm_v in zip(result["comp_names"], result["initial_params"], result["opt_params"], result["comm_params"]):
-        unit = "Ohm" if name.startswith("R") else "F"
-        print(f"{name:<26} | {format_eng(init_v, unit):>15} | {format_eng(opt_v, unit):>18} | {format_eng(comm_v, unit):>15}", flush=True)
-    print("-" * 76, flush=True)
-    print(f"{'Frequency':<26} | {result['init_fc']:>12.2f} Hz | {result['final_fc_opt']:>15.2f} Hz | {result['final_fc_comm']:>12.2f} Hz", flush=True)
-    print(f"{'Target Frequency':<26} | {target_fc:>12.2f} Hz | {target_fc:>15.2f} Hz | {target_fc:>12.2f} Hz", flush=True)
-    print(f"{'Percentage Error':<26} | {abs(result['init_fc']-target_fc)/target_fc*100:>11.2f} %  | {result['pct_err_opt']:>14.4f} %  | {result['pct_err_comm']:>11.2f} %", flush=True)
-    if order == 2 or filter_type == "bpf":
-        print(f"{'Quality Factor (Q)':<26} | {result['init_q']:>15.4f} | {result['final_q_opt']:>18.4f} | {result['final_q_comm']:>15.4f}", flush=True)
-        print(f"{'Target Q':<26} | {target_q:>15.4f} | {target_q:>18.4f} | {target_q:>15.4f}", flush=True)
-    print("=" * 76, flush=True)
-    print(f"Bill of Materials (BOM):       {result['bom_csv_path']}", flush=True)
-    print(f"KiCad Schematic Netlist:       {result['kicad_net_path']}", flush=True)
-    print(f"SPICE Netlist (Final):         {CURRENT_SIM_PATH}", flush=True)
-    print(f"Comparative Bode Plot:         {PLOT_PATH}", flush=True)
-    print("=" * 76 + "\n", flush=True)
+    print(f"Bode Plot exported: {PLOT_PATH}")
 
     if args.monte_carlo:
         run_monte_carlo_analysis(
@@ -1137,13 +1439,14 @@ def main():
             order=order,
             filter_type=filter_type,
             target_fc=target_fc,
-            target_q=target_q,
             r_tol=r_tol,
-            c_tol=c_tol,
+            c_tol=args.c_tol,
             trials=args.mc_trials,
+            target_q=target_q,
             ngspice_bin=ngspice_bin,
-            fallback=use_fallback,
-            output_plot=MC_PLOT_PATH
+            fallback=args.fallback,
+            opamp_model=args.opamp_model,
+            v_supply=args.v_supply
         )
 
 

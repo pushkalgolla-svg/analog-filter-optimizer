@@ -1,21 +1,29 @@
-* Parameterized 2nd-Order Multiple-Feedback (MFB) Band-Pass Filter Template
+* Parameterized 2nd-Order Multiple-Feedback (MFB) Inverting Band-Pass Filter
+* Active Amplifier Mode: {MODEL_MODE_DESC}
+{MODEL_INCLUDE}
+
+* Independent AC Input Voltage Source
 Vin in 0 ac 1.0
 
-* MFB Band-Pass Filter Network
+* Power Supply Rails and Decoupling Network
+{POWER_SUPPLY_BLOCK}
+
+* Multiple-Feedback (MFB) Band-Pass Filter Network
 R1 in n1 {R1_VAL}
 R2 n1 0 {R2_VAL}
 C1 n1 inm {C1_VAL}
 C2 n1 out {C2_VAL}
 R3 inm out {R3_VAL}
 
-* Inverting Op-Amp Buffer (VCVS with gain 1e5, inverting input inm, non-inverting 0)
-Eop out 0 0 inm 1e5
+* Operational Amplifier Subsystem
+{OPAMP_BLOCK}
 
+* Control block for AC frequency sweep and automated data export
 .control
 set wr_singlescale
 ac dec 100 {F_START} {F_STOP}
 let vdb_out = db(v(out))
-wrdata output/sim_data.txt vdb_out
+wrdata {OUTPUT_DATA_FILE} vdb_out
 quit
 .endc
 .end
