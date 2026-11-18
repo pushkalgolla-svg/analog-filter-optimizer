@@ -1140,9 +1140,16 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
 def generate_bode_plot(freqs_opt, mags_opt, target_fc, achieved_fc_opt,
                        freqs_comm=None, mags_comm=None, achieved_fc_comm=None,
                        order=1, filter_type="lpf", output_path=PLOT_PATH):
-    """Generates comparative Bode magnitude plot."""
-    plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
-    fig, ax = plt.subplots(figsize=(11, 6.5), dpi=300)
+    """Generates comparative Bode magnitude plot with EDA instrument dark theme."""
+    fig, ax = plt.subplots(figsize=(11, 6.5), dpi=300, facecolor="#0f172a")
+    ax.set_facecolor("#0b1120")
+    for spine in ax.spines.values():
+        spine.set_color("#334155")
+    ax.tick_params(colors="#94a3b8", labelsize=9.5)
+    ax.xaxis.label.set_color("#94a3b8")
+    ax.yaxis.label.set_color("#94a3b8")
+    ax.title.set_color("#f8fafc")
+    ax.grid(True, which="both", linestyle="--", linewidth=0.5, color="#1e293b", alpha=0.8)
 
     if filter_type == "lpf":
         if order == 1:
@@ -1161,20 +1168,20 @@ def generate_bode_plot(freqs_opt, mags_opt, target_fc, achieved_fc_opt,
         slope_label = "+/-20 dB/dec"
         title_name = "2nd-Order MFB Band-Pass"
 
-    ax.semilogx(freqs_opt, mags_opt, color="#1f77b4", linewidth=2.5,
+    ax.semilogx(freqs_opt, mags_opt, color="#f59e0b", linestyle="--", linewidth=2.0, alpha=0.9,
                 label=f"Continuous Optimal: {achieved_fc_opt:.1f} Hz ({slope_label})")
 
     if freqs_comm is not None and mags_comm is not None:
-        ax.semilogx(freqs_comm, mags_comm, color="#2ca02c", linestyle="--", linewidth=2.0,
+        ax.semilogx(freqs_comm, mags_comm, color="#38bdf8", linewidth=2.6,
                     label=f"Commercial Standard: {achieved_fc_comm:.1f} Hz")
 
     if filter_type in ["lpf", "hpf", "cascade4"]:
         cutoff_db = -3.0103
-        ax.axhline(cutoff_db, color="#d62728", linestyle=":", alpha=0.8, label=f"-3 dB Cutoff ({cutoff_db:.2f} dB)")
-        ax.axvline(target_fc, color="#7f7f7f", linestyle="-.", alpha=0.7, label=f"Target ({target_fc:.0f} Hz)")
-        ax.scatter([achieved_fc_opt], [cutoff_db], color="#1f77b4", s=90, zorder=5)
+        ax.axhline(cutoff_db, color="#f43f5e", linestyle=":", linewidth=1.5, alpha=0.9, label=f"-3 dB Cutoff ({cutoff_db:.2f} dB)")
+        ax.axvline(target_fc, color="#64748b", linestyle="-.", linewidth=1.2, alpha=0.8, label=f"Target ({target_fc:.0f} Hz)")
+        ax.scatter([achieved_fc_opt], [cutoff_db], color="#f43f5e", s=90, zorder=5, edgecolor="#ffffff", linewidth=1.2)
     else:
-        ax.axvline(target_fc, color="#7f7f7f", linestyle="-.", alpha=0.7, label=f"Target Center ({target_fc:.0f} Hz)")
+        ax.axvline(target_fc, color="#64748b", linestyle="-.", linewidth=1.2, alpha=0.8, label=f"Target Center ({target_fc:.0f} Hz)")
 
     ax.set_title(
         f"Bode Magnitude Plot - {title_name}\n"
@@ -1183,6 +1190,8 @@ def generate_bode_plot(freqs_opt, mags_opt, target_fc, achieved_fc_opt,
     )
     ax.set_xlabel("Frequency (Hz)", fontsize=11, fontweight="bold")
     ax.set_ylabel("Magnitude (dB)", fontsize=11, fontweight="bold")
+    ax.legend(loc="lower left" if filter_type != "hpf" else "lower right", frameon=True, fontsize=9.0,
+              facecolor="#131b2a", edgecolor="#334155", labelcolor="#cbd5e1")
     ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.7)
     ax.set_xlim([min(freqs_opt), max(freqs_opt)])
     ax.set_ylim([max(-95.0, min(mags_opt) - 5), max(mags_opt) + 5])
@@ -1291,54 +1300,61 @@ def run_monte_carlo_analysis(comm_params, order=1, filter_type="lpf", target_fc=
 
     # Plotting Monte Carlo distributions
     if successful_trials > 0 and output_plot:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5), dpi=300)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5), dpi=300, facecolor="#0f172a")
+
+        for ax in (ax1, ax2):
+            ax.set_facecolor("#0b1120")
+            for spine in ax.spines.values():
+                spine.set_color("#334155")
+            ax.tick_params(colors="#94a3b8", labelsize=8.5)
+            ax.xaxis.label.set_color("#94a3b8")
+            ax.yaxis.label.set_color("#94a3b8")
+            ax.title.set_color("#f8fafc")
+            ax.grid(True, linestyle="--", linewidth=0.5, color="#1e293b", alpha=0.8)
 
         # Histogram 1: Cutoff / Center Frequency
         ax1.hist(valid_fcs, bins=max(10, min(30, int(successful_trials / 4))),
-                 color="#1f77b4", edgecolor="black", alpha=0.7, density=True)
+                 color="#38bdf8", edgecolor="#0f172a", alpha=0.75, density=True)
         std_safe = max(std_fc, 1e-6)
         x_grid = np.linspace(min(valid_fcs) - 20, max(valid_fcs) + 20, 200)
         pdf = (1.0 / (std_safe * np.sqrt(2.0 * np.pi))) * np.exp(-0.5 * ((x_grid - mu_fc) / std_safe) ** 2)
-        ax1.plot(x_grid, pdf, color="#0b407a", linewidth=2.0, label=f"Gaussian Fit ($\\mu$={mu_fc:.1f}Hz, s={std_fc:.1f}Hz)")
+        ax1.plot(x_grid, pdf, color="#0284c7", linewidth=2.2, label=f"Gaussian Fit ($\\mu$={mu_fc:.1f}Hz, s={std_fc:.1f}Hz)")
 
-        ax1.axvline(target_fc, color="#d62728", linestyle="--", linewidth=2.0, label=f"Target ({target_fc:.0f} Hz)")
-        ax1.axvspan(target_fc * 0.98, target_fc * 1.02, color="#2ca02c", alpha=0.25, label=f"±2% Spec Band (Compliance: {yield_2pct:.1f}%)")
-        ax1.axvspan(target_fc * 0.95, target_fc * 1.05, color="#2ca02c", alpha=0.10, label=f"±5% Spec Band (Compliance: {yield_5pct:.1f}%)")
+        ax1.axvline(target_fc, color="#f43f5e", linestyle="--", linewidth=2.0, label=f"Target ({target_fc:.0f} Hz)")
+        ax1.axvspan(target_fc * 0.98, target_fc * 1.02, color="#10b981", alpha=0.25, label=f"±2% Spec Band (Compliance: {yield_2pct:.1f}%)")
+        ax1.axvspan(target_fc * 0.95, target_fc * 1.05, color="#10b981", alpha=0.10, label=f"±5% Spec Band (Compliance: {yield_5pct:.1f}%)")
 
         title_suffix = "" if yield_complete else f" (Warning: {failed_trials} non-convergent trials excluded)"
         ax1.set_title(f"Monte Carlo Frequency Distribution ({successful_trials}/{trials} Valid Runs){title_suffix}\nAssumed Tolerances: Resistors ±{r_tol}%, Capacitors ±{c_tol}%", fontsize=10.5, pad=12)
         ax1.set_xlabel("Frequency (Hz)", fontsize=10, fontweight="bold")
         ax1.set_ylabel("Probability Density", fontsize=10, fontweight="bold")
-        ax1.legend(loc="upper right", frameon=True, fontsize=8.0)
-        ax1.grid(True, linestyle="--", alpha=0.6)
+        ax1.legend(loc="upper right", frameon=True, fontsize=8.0, facecolor="#131b2a", edgecolor="#334155", labelcolor="#cbd5e1")
 
         # Subplot 2: Q factor or CDF
         if valid_qs is not None and len(valid_qs) > 0:
             ax2.hist(valid_qs, bins=max(10, min(30, int(len(valid_qs) / 4))),
-                     color="#ff7f0e", edgecolor="black", alpha=0.7, density=True)
+                     color="#f59e0b", edgecolor="#0f172a", alpha=0.75, density=True)
             mu_q = float(np.mean(valid_qs))
             std_q = float(np.std(valid_qs, ddof=1)) if len(valid_qs) > 1 else float(np.std(valid_qs))
             std_q_safe = max(std_q, 1e-6)
             xq_grid = np.linspace(min(valid_qs) - 0.05, max(valid_qs) + 0.05, 200)
             pdf_q = (1.0 / (std_q_safe * np.sqrt(2.0 * np.pi))) * np.exp(-0.5 * ((xq_grid - mu_q) / std_q_safe) ** 2)
-            ax2.plot(xq_grid, pdf_q, color="#b35400", linewidth=2.0, label=f"Gaussian Fit ($\\mu_Q$={mu_q:.4f}, $s_Q$={std_q:.4f})")
-            ax2.axvline(target_q, color="#d62728", linestyle="--", linewidth=2.0, label=f"Target Q ({target_q:.4f})")
+            ax2.plot(xq_grid, pdf_q, color="#d97706", linewidth=2.2, label=f"Gaussian Fit ($\\mu_Q$={mu_q:.4f}, $s_Q$={std_q:.4f})")
+            ax2.axvline(target_q, color="#f43f5e", linestyle="--", linewidth=2.0, label=f"Target Q ({target_q:.4f})")
             ax2.set_title(f"Monte Carlo Quality Factor (Q) Distribution\n$\\mu_Q$ = {mu_q:.4f}, $s_Q$ = {std_q:.4f}", fontsize=10.5, pad=12)
             ax2.set_xlabel("Quality Factor (Q)", fontsize=10, fontweight="bold")
             ax2.set_ylabel("Probability Density", fontsize=10, fontweight="bold")
-            ax2.legend(loc="upper right", frameon=True, fontsize=8.0)
-            ax2.grid(True, linestyle="--", alpha=0.6)
+            ax2.legend(loc="upper right", frameon=True, fontsize=8.0, facecolor="#131b2a", edgecolor="#334155", labelcolor="#cbd5e1")
         else:
             sorted_fcs = np.sort(valid_fcs)
             cdf = np.arange(1, len(sorted_fcs) + 1) / len(sorted_fcs) * 100.0
-            ax2.plot(sorted_fcs, cdf, color="#2ca02c", linewidth=2.5, label="Empirical CDF")
-            ax2.axvline(target_fc, color="#d62728", linestyle="--", label=f"Target ({target_fc:.0f} Hz)")
-            ax2.axhline(50.0, color="#7f7f7f", linestyle=":", alpha=0.7)
+            ax2.plot(sorted_fcs, cdf, color="#10b981", linewidth=2.5, label="Empirical CDF")
+            ax2.axvline(target_fc, color="#f43f5e", linestyle="--", label=f"Target ({target_fc:.0f} Hz)")
+            ax2.axhline(50.0, color="#64748b", linestyle=":", alpha=0.7)
             ax2.set_title("Cumulative Frequency Distribution Curve", fontsize=10.5, pad=12)
             ax2.set_xlabel("Frequency (Hz)", fontsize=10, fontweight="bold")
             ax2.set_ylabel("Cumulative Probability (%)", fontsize=10, fontweight="bold")
-            ax2.legend(loc="lower right", frameon=True, fontsize=8.5)
-            ax2.grid(True, linestyle="--", alpha=0.6)
+            ax2.legend(loc="lower right", frameon=True, fontsize=8.5, facecolor="#131b2a", edgecolor="#334155", labelcolor="#cbd5e1")
 
         plt.tight_layout()
         out_p = Path(output_plot)
