@@ -13,16 +13,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-import importlib
 import scripts.synthesize as syn
 import scripts.export_manufacturing as exp
-
-# In Streamlit Cloud hot-reload, force reload submodules to prevent stale sys.modules caching
-try:
-    importlib.reload(syn)
-    importlib.reload(exp)
-except Exception:
-    pass
 
 OPAMP_MODEL_TI = getattr(syn, "OPAMP_MODEL_TI", "ti_opa1678")
 OPAMP_MODEL_IDEAL = getattr(syn, "OPAMP_MODEL_IDEAL", "idealized")
@@ -320,7 +312,7 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.header("🎲 Manufacturing Yield Analysis")
 enable_mc = st.sidebar.checkbox("Run Monte Carlo Statistical Analysis", value=True)
-mc_trials = st.sidebar.slider("Monte Carlo Trials", min_value=10, max_value=150, value=50, step=10)
+mc_trials = st.sidebar.slider("Monte Carlo Trials", min_value=10, max_value=150, value=25, step=5)
 
 # Check SPICE simulator
 ngspice_bin = syn.find_ngspice()

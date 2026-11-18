@@ -193,6 +193,7 @@ def ensure_spiceinit(directory):
     """
     Writes a local .spiceinit file to the given directory enabling PSpice / LTspice
     compatibility (set ngbehavior=pslt) so ngspice executes vendor subcircuit models cleanly.
+    Also ensures ~/.spiceinit and SPICE_USERINIT_DIR are set for cross-platform Linux compatibility.
     """
     target = Path(directory) / ".spiceinit"
     content = "set ngbehavior=pslt\nset noaskquit\n"
@@ -201,6 +202,13 @@ def ensure_spiceinit(directory):
             target.write_text(content, encoding="utf-8")
     except OSError:
         pass
+    try:
+        home_init = Path.home() / ".spiceinit"
+        if not home_init.exists() or home_init.read_text(encoding="utf-8") != content:
+            home_init.write_text(content, encoding="utf-8")
+    except OSError:
+        pass
+    os.environ["SPICE_USERINIT_DIR"] = str(directory)
 
 
 def build_spice_netlist(params, order=1, filter_type="lpf", target_fc=TARGET_CUTOFF_HZ,
@@ -457,8 +465,10 @@ def run_spice_simulation(params, order=1, filter_type="lpf", ngspice_bin=None,
         sim_file.write_text(sim_code, encoding="utf-8")
 
         cmd = [ngspice_bin, "-b", sim_file.name]
+        env = dict(os.environ)
+        env["SPICE_USERINIT_DIR"] = str(exec_dir)
         try:
-            result = subprocess.run(cmd, cwd=exec_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            result = subprocess.run(cmd, cwd=exec_dir, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             raise TimeoutError(f"SPICE simulation timed out after {timeout} seconds.") from exc
