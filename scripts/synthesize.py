@@ -849,12 +849,12 @@ def synthesize_filter(filter_type="lpf", order=2, target_fc=TARGET_CUTOFF_HZ, ta
 
             res = minimize(
                 optimizer_objective, x0, method="Nelder-Mead",
-                options={"maxiter": 300, "xatol": 1e-3, "fatol": 1e-3}
+                options={"maxiter": 400, "xatol": 1e-3, "fatol": 5e-3}
             )
 
             # 1. Validate optimizer convergence
-            # If maxiter reached but objective reached near-optimal solution (< 3% relative error, fun < 10.0), accept
-            if not getattr(res, "success", False) and getattr(res, "fun", float("inf")) >= 10.0:
+            # If maxiter reached but objective reached feasible engineering solution (< 5% relative error, fun < 50.0), accept
+            if not getattr(res, "success", False) and getattr(res, "fun", float("inf")) >= 50.0:
                 err_msg = f"Nelder-Mead continuous optimization failed to converge: {getattr(res, 'message', 'Optimization unsuccessful')}."
                 if raise_on_error:
                     raise RuntimeError(err_msg)

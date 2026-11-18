@@ -873,7 +873,7 @@ def generate_bom_data(topology_type, components, r_tol=1.0, c_tol=5.0):
         "Datasheet / Reference": "Generic 2.54mm pitch header",
         "Verification Date": "2026-11-14",
         "Lifecycle Status": "Unverified",
-        "Est. Unit Cost (USD)": 0.15
+        "Est. Unit Cost (USD)": "$0.15"
     }))
     item_num += 1
 
@@ -891,7 +891,7 @@ def generate_bom_data(topology_type, components, r_tol=1.0, c_tol=5.0):
         "Datasheet / Reference": "Generic 2.54mm pitch header",
         "Verification Date": "2026-11-14",
         "Lifecycle Status": "Unverified",
-        "Est. Unit Cost (USD)": 0.15
+        "Est. Unit Cost (USD)": "$0.15"
     }))
     item_num += 1
 
@@ -910,7 +910,7 @@ def generate_bom_data(topology_type, components, r_tol=1.0, c_tol=5.0):
             "Datasheet / Reference": "Generic 2.54mm pitch header",
             "Verification Date": "2026-11-14",
             "Lifecycle Status": "Unverified",
-            "Est. Unit Cost (USD)": 0.20
+            "Est. Unit Cost (USD)": "$0.20"
         }))
         item_num += 1
 

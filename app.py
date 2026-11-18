@@ -666,6 +666,8 @@ with tab_bom:
     st.subheader("Production Bill of Materials (BOM)")
     
     df_bom = pd.DataFrame(res["bom_rows"])
+    for col in df_bom.columns:
+        df_bom[col] = df_bom[col].astype(str)
     total_items = len(df_bom)
     ref_col = "RefDes" if "RefDes" in df_bom.columns else ("Reference" if "Reference" in df_bom.columns else df_bom.columns[1])
     desc_col = "Description" if "Description" in df_bom.columns else df_bom.columns[0]
